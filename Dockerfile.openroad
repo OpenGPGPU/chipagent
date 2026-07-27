@@ -1,0 +1,50 @@
+# ChipAgent OpenROAD/OpenSTA adapter image
+#
+# This image intentionally does not build OpenROAD from source. It wraps an
+# existing runtime image that already contains `openroad` and `sta`, then adds
+# the same non-root working convention used by the base ChipAgent image.
+#
+# Example:
+#   docker build \
+#     --build-arg OPENROAD_BASE_IMAGE=openroad/orfs:latest \
+#     -t chipagent/openroad:latest -f Dockerfile.openroad .
+
+ARG OPENROAD_BASE_IMAGE=openroad/orfs:latest
+FROM ${OPENROAD_BASE_IMAGE}
+
+SHELL ["/bin/bash", "-lc"]
+
+RUN set -eux; \
+    if [[ -f /OpenROAD-flow-scripts/env.sh ]]; then source /OpenROAD-flow-scripts/env.sh; fi; \
+    command -v openroad; \
+    command -v sta; \
+    openroad -version; \
+    sta -version
+
+RUN cat >/usr/local/bin/openroad <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ -f /OpenROAD-flow-scripts/env.sh ]]; then
+  source /OpenROAD-flow-scripts/env.sh >/dev/null
+fi
+PATH="$(printf '%s' "$PATH" | tr ':' '\n' | grep -vx /usr/local/bin | paste -sd: -)"
+exec openroad "$@"
+EOF
+RUN chmod +x /usr/local/bin/openroad
+
+RUN cat >/usr/local/bin/sta <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ -f /OpenROAD-flow-scripts/env.sh ]]; then
+  source /OpenROAD-flow-scripts/env.sh >/dev/null
+fi
+PATH="$(printf '%s' "$PATH" | tr ':' '\n' | grep -vx /usr/local/bin | paste -sd: -)"
+exec sta "$@"
+EOF
+RUN chmod +x /usr/local/bin/sta
+
+RUN if ! id chipagent >/dev/null 2>&1; then useradd -m -s /bin/bash chipagent; fi
+USER chipagent
+WORKDIR /work
+
+CMD ["sh"]
