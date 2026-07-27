@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 
 def test_toolchain_status_shape():
     from chipagent.toolchain import toolchain_status
@@ -209,6 +211,9 @@ def test_run_flow_persists_report_and_artifacts(tmp_path):
         module_name="adder",
         output_dir=str(tmp_path),
     ))
+
+    if data["steps"]["synthesis"].get("tool_available") is False:
+        pytest.skip("requires Yosys on the host or in the configured Docker image")
 
     assert data["status"] == "success"
     assert data["steps"]["simulation"]["passed"] == "passed"

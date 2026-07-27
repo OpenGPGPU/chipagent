@@ -308,20 +308,15 @@ Claude：（调 chipagent_query_knowledge_base）
 
 ---
 
-## 6. 交互式 CLI（不用 Claude Code 时）
+## 6. 其他 MCP Host
 
-不想用 Claude Code、直接在终端对话：
+ChipAgent 的交互界面由 Claude Code 或其他 MCP host 提供。服务端入口为：
 
 ```bash
-python -m chipagent.workflow chat           # LLM 网关模式（流式回复）
-python -m chipagent.workflow chat --no-llm  # 离线确定性模式
+python -m chipagent.mcp
 ```
 
-特点：
-- **多轮上下文**：记得上一轮的 spec / 选定设计 / tradeoff 表
-- **LLM 主导意图 + 规则兜底**：明确设计请求路由到 DSE
-- **流式打字回复**：走 SSE 逐字输出
-- **可追问/微调**："为什么选 v6""再小一点""看 v3 的 RTL"
+历史 `python -m chipagent.workflow chat` 入口已经废弃。
 
 ---
 

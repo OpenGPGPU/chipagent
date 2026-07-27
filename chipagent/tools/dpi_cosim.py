@@ -1,12 +1,12 @@
-"""DPI Co-simulation tool using Verilator."""
+"""DPI co-simulation tool using Verilator."""
 import re
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Dict, Any
+from typing import Any, Dict, Optional
 
-from chipagent.tools.base import Tool, ToolContext, ToolResult
+from chipagent.tools.base import Tool, ToolContext, ToolResult, trust_metadata
 
 
 class DPICosimTool(Tool):
@@ -39,14 +39,24 @@ class DPICosimTool(Tool):
                 issues=["Missing input: testbench"],
             )
 
+        testbench_module = self._top_module(testbench)
+        if not testbench_module:
+            return ToolResult(
+                result={"status": "error", "message": "Unable to determine testbench top module"},
+                issues=["Invalid input: testbench has no module declaration"],
+            )
+
         # Check for Verilator
         if not shutil.which("verilator"):
             return self._estimate_cosim(reg_code, dpi_code, testbench, cycles)
 
-        return self._run_verilator_dpi(reg_code, dpi_code, testbench, cycles)
+        return self._run_verilator_dpi(
+            reg_code, dpi_code, testbench, cycles, testbench_module
+        )
 
     def _run_verilator_dpi(self, reg_code: str, dpi_code: str,
-                           testbench: str, cycles: int) -> ToolResult:
+                           testbench: str, cycles: int,
+                           testbench_module: str) -> ToolResult:
         """Run actual Verilator DPI co-simulation."""
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir = Path(tmpdir)
@@ -65,21 +75,22 @@ class DPICosimTool(Tool):
                 dpi_file = tmpdir / "dpi.cpp"
                 dpi_file.write_text(dpi_code)
 
-            # Run Verilator with DPI support
+            # ``--binary`` supplies Verilator's generated simulation main.
+            # The previous ``--cc --exe`` invocation required a caller-provided
+            # C++ main and incorrectly passed dpi.cpp as a compiler flag.
             verilator_cmd = [
                 "verilator",
-                "--cc",
-                "--exe",
-                "--build",
+                "--binary",
+                "--timing",
+                "--top-module", testbench_module,
+                "-Wno-fatal",
                 "--Mdir", str(tmpdir / "obj_dir"),
                 "-j", "0",
             ]
 
-            # Add DPI C++ file if present
-            if dpi_file:
-                verilator_cmd.extend(["--CFLAGS", "-std=c++14", str(dpi_file)])
-
             verilator_cmd.extend([str(rtl_file), str(tb_file)])
+            if dpi_file:
+                verilator_cmd.append(str(dpi_file))
 
             try:
                 result = subprocess.run(
@@ -93,21 +104,35 @@ class DPICosimTool(Tool):
                 if result.returncode != 0:
                     return ToolResult(
                         result={
-                            "status": "failed",
+                            "status": "error",
                             "compilation": "failed",
-                            "stderr": result.stderr,
+                            "stage": "compile",
+                            "stderr": result.stderr[-4000:],
+                            **trust_metadata(
+                                source="tool",
+                                tool="verilator",
+                                tool_available=True,
+                                command=verilator_cmd,
+                            ),
                         },
                         issues=["Verilator compilation failed"],
                     )
 
                 # Run simulation
-                sim_exe = tmpdir / "obj_dir" / "Vtb"
+                sim_exe = tmpdir / "obj_dir" / f"V{testbench_module}"
                 if not sim_exe.exists():
                     return ToolResult(
                         result={
-                            "status": "failed",
+                            "status": "error",
                             "compilation": "success",
+                            "stage": "locate_executable",
                             "message": "Simulation executable not found",
+                            **trust_metadata(
+                                source="tool",
+                                tool="verilator",
+                                tool_available=True,
+                                command=verilator_cmd,
+                            ),
                         },
                         issues=["Simulation executable not generated"],
                     )
@@ -122,22 +147,43 @@ class DPICosimTool(Tool):
 
                 # Parse simulation output
                 sim_output = self._parse_simulation_output(sim_result.stdout, sim_result.stderr)
+                failed = (
+                    sim_result.returncode != 0
+                    or sim_output["assertions_failed"] > 0
+                    or bool(re.search(r"(?:FAIL|TEST FAILED|ERROR)", sim_result.stdout, re.IGNORECASE))
+                )
 
                 return ToolResult(
                     result={
-                        "status": "passed" if sim_output.get("passed", False) else "failed",
+                        "status": "error" if failed else "success",
                         "compilation": "success",
                         "simulation": sim_output,
                         "cycles": cycles,
                         "stdout": sim_result.stdout,
                         "stderr": sim_result.stderr,
+                        "returncode": sim_result.returncode,
+                        **trust_metadata(
+                            source="tool",
+                            tool="verilator",
+                            tool_available=True,
+                            command=[str(sim_exe)],
+                        ),
                     },
-                    issues=[] if sim_output.get("passed", False) else ["Simulation failed"],
+                    issues=["Simulation failed"] if failed else [],
                 )
 
             except subprocess.TimeoutExpired:
                 return ToolResult(
-                    result={"status": "timeout"},
+                    result={
+                        "status": "error",
+                        "stage": "timeout",
+                        **trust_metadata(
+                            source="tool",
+                            tool="verilator",
+                            tool_available=True,
+                            command=verilator_cmd,
+                        ),
+                    },
                     issues=["Verilator DPI co-simulation timed out"],
                 )
             except Exception as e:
@@ -159,9 +205,13 @@ class DPICosimTool(Tool):
         tb_coverage = self._estimate_testbench_coverage(testbench, cycles)
 
         return ToolResult(
-            result={
-                "status": "estimated",
-                "tool": "static_analysis",
+                result={
+                    "status": "estimated",
+                    **trust_metadata(
+                        source="static_estimate",
+                        tool="static_analysis",
+                        tool_available=False,
+                    ),
                 "dpi_imports": dpi_imports,
                 "dpi_exports": dpi_exports,
                 "testbench_analysis": tb_coverage,
@@ -170,6 +220,12 @@ class DPICosimTool(Tool):
             },
             issues=["Verilator not available, results are estimates"],
         )
+
+    @staticmethod
+    def _top_module(testbench: str) -> Optional[str]:
+        """Return the first module declared by a testbench."""
+        match = re.search(r"\bmodule\s+([A-Za-z_][A-Za-z0-9_$]*)", testbench)
+        return match.group(1) if match else None
 
     def _analyze_dpi_imports(self, reg_code: str) -> Dict[str, Any]:
         """Analyze DPI import statements in Verilog code."""

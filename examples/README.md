@@ -267,18 +267,14 @@ python -m chipagent.workflow dse "设计一个 AXI DMA" \
 
 返回 tradeoff 表 + Pareto 前沿 + 选定设计 + 分区理由。
 
-### 7. 交互式会话（Claude 风格）
+### 7. 启动 MCP 服务
 
 ```bash
-python -m chipagent.workflow chat           # LLM 网关模式（流式回复）
-python -m chipagent.workflow chat --no-llm  # 离线确定性模式
+python -m chipagent.mcp
 ```
 
-特点：
-- **多轮上下文**：记得上一轮的 spec / 选定设计 / tradeoff 表
-- **LLM 主导意图 + 规则兜底**：明确设计请求路由到 DSE
-- **流式打字回复**：走 SSE 逐字输出
-- **可追问/微调**："为什么选 v6""再小一点""看 v3 的 RTL"
+交互式会话由 Claude Code 或其他 MCP host 提供。历史
+`python -m chipagent.workflow chat` 入口已经废弃。
 
 ### 9. 要 durable / 可恢复？走 Temporal
 
@@ -310,7 +306,7 @@ CHIPAGENT_USE_TEMPORAL=1 chipagent "请为 AXI DMA 模块生成 RTL" --output-di
 | 纯模板、不联网 | 加 `--no-llm` |
 | 带仓库上下文 | 加 `--context-dir ./spec` |
 | 生成寄存器块 | 描述里带"寄存器块定义" |
-| 交互式多轮对话 | `python -m chipagent.workflow chat` |
+| 交互式多轮对话 | 在 Claude Code 或其他 MCP host 中连接 `python -m chipagent.mcp` |
 | 走 Temporal（durable） | `CHIPAGENT_USE_TEMPORAL=1 chipagent ...`，先起 server+worker |
 | 任务提交+审批 | Claude Code 对话 / `python -m chipagent.workflow task submit "..."` |
 | 查看 MCP 工具清单 | `python -m chipagent.mcp --list` |

@@ -155,8 +155,8 @@ chipagent "请为 AXI DMA 模块生成 RTL 模板" --output-dir ./generated
 # 设计空间探索
 python -m chipagent.workflow dse "设计一个 AXI DMA" --targets area=300,fmax=250
 
-# 交互式多轮对话
-python -m chipagent.workflow chat
+# MCP 服务（推荐通过 Claude Code 或其他 MCP host 使用）
+python -m chipagent.mcp
 ```
 
 详见 [examples/README.md](examples/README.md)。
