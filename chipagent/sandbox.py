@@ -1,14 +1,15 @@
-"""Sandboxed execution + dry-run (Phase 2 Step 6 / §1.9.4 §11.2).
+"""Isolated execution + dry-run (Phase 2 Step 6 / §1.9.4 §11.2).
 
-Sim/compile/synthesis commands run inside a sandbox so the host is never
-exposed to an untrusted EDA invocation. Two modes:
+Sim/compile/synthesis commands can run in one of two execution modes:
 
 - ``host`` (default): run via ``subprocess.run`` with a hard ``timeout`` and
-  CPU affinity left to the OS. This is the zero-dependency fallback for dev /
-  CI hosts without Docker.
+  CPU affinity left to the OS. This is intended only for trusted local inputs
+  and is not a security boundary.
 - ``docker``: run inside a container with a read-only mount of the repo, a
   writable scratch mount, CPU/memory caps, and ``--network none``. Requires
   the ``docker`` CLI and the chipagent toolchain image (``CHIPAGENT_SANDBOX_IMAGE``).
+  Docker mode fails closed when Docker is unavailable. Trusted development
+  environments can explicitly set ``CHIPAGENT_ALLOW_HOST_FALLBACK=1``.
 
 The :meth:`dry_run` path returns the exact command + a preview of the files
 that would be produced **without** invoking anything — the plan's "干跑模式"
@@ -156,17 +157,36 @@ class Sandbox:
         env: Optional[Dict[str, str]],
     ) -> SandboxResult:
         if not shutil.which("docker"):
-            # Fall back to host if docker is configured but unavailable, so the
-            # closed loop still runs on a bare CI box. The mode in the result
-            # records the fallback honestly.
-            res = self._run_host(command, work_dir=work_dir, timeout=timeout, env=env)
-            res.mode = "host-fallback"
-            return res
+            allow_host_fallback = os.environ.get(
+                "CHIPAGENT_ALLOW_HOST_FALLBACK", "0"
+            ).lower() in {"1", "true", "yes"}
+            if allow_host_fallback:
+                res = self._run_host(
+                    command, work_dir=work_dir, timeout=timeout, env=env
+                )
+                res.mode = "host-fallback"
+                return res
+            return SandboxResult(
+                returncode=127,
+                stderr=(
+                    "Docker sandbox requested but docker CLI is unavailable. "
+                    "Install/start Docker, select CHIPAGENT_SANDBOX=host for "
+                    "trusted inputs, or explicitly set "
+                    "CHIPAGENT_ALLOW_HOST_FALLBACK=1."
+                ),
+                command=list(command),
+                mode="unavailable",
+            )
         docker_cmd = [
             "docker", "run", "--rm",
             "--network", self.network,
             "--cpus", str(self.cpu_quota),
             "--memory", self.memory_limit,
+            "--pids-limit", "256",
+            "--read-only",
+            "--cap-drop", "ALL",
+            "--security-opt", "no-new-privileges",
+            "--tmpfs", "/tmp:rw,noexec,nosuid,size=512m",
         ]
         if work_dir:
             docker_cmd += ["-v", f"{Path(work_dir).resolve()}:/work",

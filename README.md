@@ -68,6 +68,11 @@ pip install -e .
 内部采用分层镜像：基础工具使用 `chipagent/tools:latest`，OpenROAD/OpenSTA 使用 `chipagent/openroad:latest`。用户正常调用 MCP 工具时不需要手动选择镜像。
 需要真实 EDA 的工具在 host 和 Docker 都不可用时应明确返回不可用/错误；PPA 静态估算类工具会显式标记为估算。
 
+处理不可信 RTL、testbench 或 DPI C++ 时，应设置
+`CHIPAGENT_SANDBOX=docker`。Docker 模式默认 fail closed：Docker CLI
+不可用时不会静默回退到宿主机。只有处理可信本地输入且明确接受风险时，才可设置
+`CHIPAGENT_ALLOW_HOST_FALLBACK=1`；直接使用 `host` 模式不构成安全隔离。
+
 检查和配置工具链：
 
 ```bash

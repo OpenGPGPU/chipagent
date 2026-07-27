@@ -284,6 +284,62 @@ class TestSandbox:
         with pytest.raises(SandboxError):
             Sandbox(mode="vmware")
 
+    def test_docker_mode_fails_closed_when_cli_is_missing(self, monkeypatch):
+        from chipagent import sandbox as sandbox_module
+
+        monkeypatch.delenv("CHIPAGENT_ALLOW_HOST_FALLBACK", raising=False)
+        monkeypatch.setattr(sandbox_module.shutil, "which", lambda _: None)
+        r = sandbox_module.Sandbox(mode="docker").run(["echo", "must-not-run"])
+
+        assert r.returncode == 127
+        assert r.mode == "unavailable"
+        assert "Docker sandbox requested" in r.stderr
+
+    def test_docker_host_fallback_requires_explicit_opt_in(self, monkeypatch):
+        from chipagent import sandbox as sandbox_module
+
+        monkeypatch.setenv("CHIPAGENT_ALLOW_HOST_FALLBACK", "1")
+        monkeypatch.setattr(sandbox_module.shutil, "which", lambda _: None)
+        r = sandbox_module.Sandbox(mode="docker").run(["echo", "trusted"])
+
+        assert r.ok
+        assert r.mode == "host-fallback"
+        assert "trusted" in r.stdout
+
+    def test_docker_command_uses_hardening_flags(self, monkeypatch, tmp_path):
+        from chipagent import sandbox as sandbox_module
+
+        monkeypatch.setattr(sandbox_module.shutil, "which", lambda _: "/usr/bin/docker")
+
+        class Result:
+            returncode = 0
+            stdout = "ok"
+            stderr = ""
+
+        captured = {}
+
+        def fake_run(command, **kwargs):
+            captured["command"] = command
+            return Result()
+
+        monkeypatch.setattr(sandbox_module.subprocess, "run", fake_run)
+        r = sandbox_module.Sandbox(mode="docker").run(
+            ["yosys", "-V"], work_dir=str(tmp_path)
+        )
+
+        assert r.ok
+        command = captured["command"]
+        assert "--read-only" in command
+        assert ["--cap-drop", "ALL"] == command[
+            command.index("--cap-drop"):command.index("--cap-drop") + 2
+        ]
+        assert ["--security-opt", "no-new-privileges"] == command[
+            command.index("--security-opt"):command.index("--security-opt") + 2
+        ]
+        assert ["--pids-limit", "256"] == command[
+            command.index("--pids-limit"):command.index("--pids-limit") + 2
+        ]
+
     def test_is_dry_run_env(self, monkeypatch):
         from chipagent.sandbox import is_dry_run
         monkeypatch.setenv("CHIPAGENT_DRY_RUN", "1")
