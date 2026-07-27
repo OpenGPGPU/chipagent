@@ -1657,29 +1657,24 @@ def chipagent_run_flow(
     else:
         steps["lvs"] = {"status": "skipped", "reason": "lvs netlists not provided"}
 
-    failures = []
-    for name, data in steps.items():
-        status = data.get("status")
-        passed = data.get("passed")
-        if status == "skipped":
-            continue
-        if status in {"error", "failed", "timeout"}:
-            failures.append(name)
-        if passed == "failed":
-            failures.append(name)
-        if name == "formality" and data.get("equivalent") is False:
-            failures.append(name)
-        if name == "lvs" and data.get("match") is False:
-            failures.append(name)
+    classification = _classify_flow_steps(steps)
+    failures = sorted(set(
+        classification["design_failures"]
+        + classification["infrastructure_failures"]
+    ))
 
     summary = _flow_summary(steps, artifacts)
 
     report = {
+        # ``status`` remains binary for compatibility with existing MCP
+        # consumers. ``outcome`` explains whether failure came from the design
+        # or from an incomplete EDA environment.
         "status": "failed" if failures else "success",
         "module_name": module_name,
         "output_dir": str(out),
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "failures": sorted(set(failures)),
+        "failures": failures,
+        **classification,
         "summary": summary,
         "steps": steps,
         "artifacts": artifacts,
@@ -1691,6 +1686,58 @@ def chipagent_run_flow(
     html_path.write_text(_flow_summary_html(report, html_path), encoding="utf-8")
     report["artifacts"]["flow_summary.html"] = str(html_path)
     return _to_text(report)
+
+
+def _classify_flow_steps(steps: Dict[str, Any]) -> Dict[str, Any]:
+    """Classify flow steps without conflating RTL and environment failures."""
+    design_failures: list[str] = []
+    infrastructure_failures: list[str] = []
+    unavailable_steps: list[str] = []
+    completed_steps: list[str] = []
+    skipped_steps: list[str] = []
+
+    for name, data in steps.items():
+        status = str(data.get("status") or "")
+        passed = data.get("passed")
+        unavailable = (
+            data.get("tool_available") is False
+            or status == "unavailable"
+        )
+        failed = (
+            status in {"error", "failed", "timeout"}
+            or passed == "failed"
+            or (name == "formality" and data.get("equivalent") is False)
+            or (name == "lvs" and data.get("match") is False)
+        )
+
+        if status == "skipped":
+            skipped_steps.append(name)
+        elif unavailable:
+            unavailable_steps.append(name)
+            if failed:
+                infrastructure_failures.append(name)
+        elif failed:
+            design_failures.append(name)
+        else:
+            completed_steps.append(name)
+
+    if design_failures:
+        outcome = "failed"
+    elif infrastructure_failures and completed_steps:
+        outcome = "partial"
+    elif infrastructure_failures:
+        outcome = "unavailable"
+    else:
+        outcome = "success"
+
+    return {
+        "outcome": outcome,
+        "design_failures": sorted(set(design_failures)),
+        "infrastructure_failures": sorted(set(infrastructure_failures)),
+        "unavailable_steps": sorted(set(unavailable_steps)),
+        "completed_steps": sorted(set(completed_steps)),
+        "skipped_steps": sorted(set(skipped_steps)),
+    }
 
 
 @mcp.tool()
@@ -1872,7 +1919,10 @@ def _flow_summary_html(report: Dict[str, Any], html_path: Path) -> str:
   <h1>ChipAgent Flow Summary</h1>
   <p><b>Module:</b> {_h(report.get('module_name'))}</p>
   <p><b>Status:</b> <span class="status {'failed' if report.get('status') != 'success' else ''}">{_h(report.get('status'))}</span></p>
-  <p><b>Failures:</b> {_h(', '.join(report.get('failures') or []) or 'none')}</p>
+  <p><b>Outcome:</b> {_h(report.get('outcome') or report.get('status'))}</p>
+  <p><b>Design failures:</b> {_h(', '.join(report.get('design_failures') or []) or 'none')}</p>
+  <p><b>Infrastructure failures:</b> {_h(', '.join(report.get('infrastructure_failures') or []) or 'none')}</p>
+  <p><b>Unavailable steps:</b> {_h(', '.join(report.get('unavailable_steps') or []) or 'none')}</p>
 
   <section>
     <h2>Steps</h2>

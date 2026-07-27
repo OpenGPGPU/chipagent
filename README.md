@@ -116,6 +116,11 @@ generated/examples/tiny_counter/physical_asap7/orfs-work/results/base/6_final.od
 `summary.trust` 会标出哪些结果来自真实工具，哪些仍是 `static_estimate`。例如没有 Liberty 输入时，顶层 timing/power 仍是结构估算；ASAP7 physical 的 QoR 来自 OpenROAD/ORFS。
 HTML summary 会集中展示 flow 状态、QoR、artifact 链接和 ORFS 生成的 placement/routing/congestion 等图片。
 
+Flow 报告保留兼容的二值 `status`，并提供更具体的 `outcome`：
+`success`、`partial`、`failed` 或 `unavailable`。其中
+`design_failures` 表示 RTL/验证结果失败，`infrastructure_failures` 和
+`unavailable_steps` 表示缺少 Yosys、OpenSTA、OpenROAD 等环境能力，便于调用方判断应修改设计还是配置工具链。
+
 ASAP7 physical flow 默认启用缓存：当 RTL、模块名、clock/placement 参数和 OpenROAD 镜像一致，且已有 DEF/GDS/log 时会直接复用结果。需要强制重跑时，可调用 `chipagent_run_physical_flow_asap7(..., clean=True)`，或在 `chipagent_run_flow` 中设置 `physical_clean=True`。
 
 ### 方式一：Claude Code 集成（推荐）

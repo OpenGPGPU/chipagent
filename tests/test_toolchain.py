@@ -213,12 +213,45 @@ def test_run_flow_persists_report_and_artifacts(tmp_path):
     ))
 
     if data["steps"]["synthesis"].get("tool_available") is False:
+        assert "synthesis" in data["infrastructure_failures"]
+        assert "synthesis" in data["unavailable_steps"]
+        assert data["outcome"] in {"partial", "unavailable", "failed"}
         pytest.skip("requires Yosys on the host or in the configured Docker image")
 
     assert data["status"] == "success"
+    assert data["outcome"] == "success"
+    assert data["design_failures"] == []
+    assert data["infrastructure_failures"] == []
     assert data["steps"]["simulation"]["passed"] == "passed"
     assert data["steps"]["synthesis"]["status"] == "success"
     assert data["steps"]["formality"]["equivalent"] is True
     assert data["steps"]["physical"]["status"] == "skipped"
     assert Path(data["artifacts"]["flow_report.json"]).exists()
     assert any(key.startswith("synthesis.") for key in data["artifacts"])
+
+
+def test_flow_step_classification_separates_design_and_environment_failures():
+    from chipagent.mcp import _classify_flow_steps
+
+    result = _classify_flow_steps({
+        "simulation": {
+            "status": "failed",
+            "passed": "failed",
+            "tool": "verilator",
+            "tool_available": True,
+        },
+        "synthesis": {
+            "status": "error",
+            "tool": "yosys",
+            "tool_available": False,
+        },
+        "physical": {"status": "skipped"},
+        "coverage": {"status": "passed"},
+    })
+
+    assert result["outcome"] == "failed"
+    assert result["design_failures"] == ["simulation"]
+    assert result["infrastructure_failures"] == ["synthesis"]
+    assert result["unavailable_steps"] == ["synthesis"]
+    assert result["completed_steps"] == ["coverage"]
+    assert result["skipped_steps"] == ["physical"]
