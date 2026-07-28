@@ -45,7 +45,11 @@ case "$1" in
       -t chipagent/tools:latest -f Dockerfile .
     ;;
   --docker-openroad)
-    build_args=(--pull=false --build-arg "OPENROAD_BASE_IMAGE=${CHIPAGENT_OPENROAD_BASE_IMAGE:-openroad/orfs:latest}")
+    build_args=(
+      --pull=false
+      --platform "${CHIPAGENT_OPENROAD_PLATFORM:-linux/amd64}"
+      --build-arg "OPENROAD_BASE_IMAGE=${CHIPAGENT_OPENROAD_BASE_IMAGE:-openroad/orfs:latest}"
+    )
     docker build "${build_args[@]}" \
       -t "${CHIPAGENT_OPENROAD_IMAGE:-chipagent/openroad:latest}" \
       -f Dockerfile.openroad .

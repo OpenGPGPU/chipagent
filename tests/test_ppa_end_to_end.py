@@ -110,12 +110,9 @@ endmodule
         )
 
         data = json.loads(result)
-        assert data["status"] == "success"
-        assert "estimated_fmax_mhz" in data
-        assert "timing_risk" in data
-        assert "critical_path_depth" in data
-        assert data["timing_risk"] in ["low", "medium", "high"]
-        assert data["estimated_fmax_mhz"] > 0
+        assert data["status"] == "error"
+        assert "Liberty" in data["message"]
+        assert "estimated_fmax_mhz" not in data
 
     def test_simple_rtl_power_estimation(self, simple_rtl):
         """Test power estimation for simple RTL."""
@@ -150,13 +147,8 @@ endmodule
         )
 
         data = json.loads(result)
-        assert data["status"] == "success"
-        assert "meets_all_targets" in data
-        assert "checks" in data
-        assert isinstance(data["checks"], list)
-
-        # Simple counter should easily meet these targets
-        assert data["meets_all_targets"] is True
+        assert data["status"] == "error"
+        assert "Liberty" in data["message"]
 
     def test_simple_rtl_ppa_check_fail(self, simple_rtl):
         """Test PPA target check with unachievable targets."""
@@ -172,16 +164,8 @@ endmodule
         )
 
         data = json.loads(result)
-        assert data["status"] == "success"
-        assert data["meets_all_targets"] is False
-        assert "checks" in data
-
-        # At least one check should fail
-        checks = data["checks"]
-        assert isinstance(checks, list)
-        # Check that at least one check has status "fail" or "warning"
-        failed_checks = [c for c in checks if c.get("status") in ["fail", "warning"]]
-        assert len(failed_checks) > 0
+        assert data["status"] == "error"
+        assert "Liberty" in data["message"]
 
     def test_complex_rtl_area_estimation(self, complex_rtl):
         """Test area estimation for complex RTL."""
@@ -208,9 +192,9 @@ endmodule
         )
 
         data = json.loads(result)
-        assert data["status"] == "success"
-        assert data["critical_path_depth"] >= 1  # ALU should have some depth
-        assert data["estimated_fmax_mhz"] > 0
+        assert data["status"] == "error"
+        assert "Liberty" in data["message"]
+        assert "estimated_fmax_mhz" not in data
 
     def test_complex_rtl_power_estimation(self, complex_rtl):
         """Test power estimation for complex RTL."""
@@ -241,16 +225,8 @@ endmodule
         )
 
         data = json.loads(result)
-        assert data["status"] == "success"
-        assert "suggestions" in data
-
-        # Should have some optimization suggestions
-        suggestions = data["suggestions"]
-        assert isinstance(suggestions, list)
-
-        # If targets are not met, there should be suggestions
-        if not data["meets_all_targets"]:
-            assert len(suggestions) > 0
+        assert data["status"] == "error"
+        assert "Liberty" in data["message"]
 
     def test_ppa_tools_work_without_eda(self, simple_rtl):
         """Test that PPA tools work without EDA tools installed."""
@@ -261,7 +237,8 @@ endmodule
             chipagent_check_ppa_targets
         )
 
-        # All PPA tools should work without Yosys/OpenROAD/etc.
+        # Area/power text estimators remain available. Performance must fail
+        # closed without Liberty instead of inventing a frequency.
         area_result = chipagent_estimate_area(
             reg_code=simple_rtl,
             module_name="simple_counter"
@@ -272,7 +249,7 @@ endmodule
             reg_code=simple_rtl,
             module_name="simple_counter"
         )
-        assert json.loads(perf_result)["status"] == "success"
+        assert json.loads(perf_result)["status"] == "error"
 
         power_result = chipagent_estimate_power(
             reg_code=simple_rtl,
@@ -287,7 +264,7 @@ endmodule
             max_power_mw=10.0,
             module_name="simple_counter"
         )
-        assert json.loads(ppa_result)["status"] == "success"
+        assert json.loads(ppa_result)["status"] == "error"
 
     def test_riscv_cpu_ppa_analysis(self):
         """Test PPA analysis on the RISC-V CPU from earlier demo."""

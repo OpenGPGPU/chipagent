@@ -3,14 +3,18 @@ import re
 from typing import Dict, Any, List
 from ..base import Tool, ToolContext, ToolResult
 from .area_estimator import AreaEstimator
-from .performance_estimator import PerformanceEstimator
 from .power_estimator import PowerEstimator
 
 
 class PPATargetChecker:
     """Checks PPA metrics against targets and provides optimization suggestions."""
 
-    def check(self, rtl_code: str, targets: Dict[str, Any]) -> Dict[str, Any]:
+    def check(
+        self,
+        rtl_code: str,
+        targets: Dict[str, Any],
+        performance_result: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
         """
         Run comprehensive PPA analysis and check against targets.
 
@@ -23,18 +27,21 @@ class PPATargetChecker:
         """
 
         # Run all estimators
-        area_estimator = AreaEstimator()
-        performance_estimator = PerformanceEstimator()
-        power_estimator = PowerEstimator()
-
-        area_result = area_estimator.estimate(rtl_code)
-        performance_result = performance_estimator.estimate(
-            rtl_code,
-            target_freq_mhz=targets.get("min_freq_mhz")
+        area_result = (
+            AreaEstimator().estimate(rtl_code) if "max_gates" in targets else {}
         )
-        power_result = power_estimator.estimate(
-            rtl_code,
-            clock_freq_mhz=targets.get("clock_freq_mhz", 100.0)
+        performance_result = performance_result or {
+            "status": "not_requested",
+            "measured_fmax_mhz": None,
+            "critical_path_delay_ps": None,
+        }
+        power_result = (
+            PowerEstimator().estimate(
+                rtl_code,
+                clock_freq_mhz=targets.get("clock_freq_mhz", 100.0),
+            )
+            if "max_power_mw" in targets
+            else {}
         )
 
         # Check against targets
@@ -70,27 +77,32 @@ class PPATargetChecker:
         # Performance check
         if "min_freq_mhz" in targets:
             min_freq = targets["min_freq_mhz"]
-            estimated_freq = performance_result["estimated_fmax_mhz"]
+            measured_freq = (
+                performance_result.get("constraint_aware_fmax_mhz")
+                or performance_result.get("measured_fmax_mhz")
+            )
+            if measured_freq is None:
+                raise ValueError("Performance target checking requires a real measured_fmax_mhz result")
 
-            if estimated_freq >= min_freq:
+            if measured_freq >= min_freq:
                 status = "pass"
-                message = f"Performance: {estimated_freq} MHz (target: {min_freq} MHz) ✓"
-            elif estimated_freq >= min_freq * 0.9:  # 10% margin
+                message = f"Performance: {measured_freq:.2f} MHz (target: {min_freq} MHz) ✓"
+            elif measured_freq >= min_freq * 0.9:  # 10% margin
                 status = "warning"
-                message = f"Performance: {estimated_freq} MHz (target: {min_freq} MHz) - close to limit"
+                message = f"Performance: {measured_freq:.2f} MHz (target: {min_freq} MHz) - close to limit"
                 meets_all_targets = False
             else:
                 status = "fail"
-                message = f"Performance: {estimated_freq} MHz (target: {min_freq} MHz) - BELOW TARGET"
+                message = f"Performance: {measured_freq:.2f} MHz (target: {min_freq} MHz) - BELOW TARGET"
                 meets_all_targets = False
 
             checks.append({
                 "metric": "performance",
                 "status": status,
                 "message": message,
-                "estimated": estimated_freq,
+                "measured": measured_freq,
                 "target": min_freq,
-                "margin_pct": round((estimated_freq - min_freq) / min_freq * 100, 1)
+                "margin_pct": round((measured_freq - min_freq) / min_freq * 100, 1)
             })
 
         # Power check
@@ -146,10 +158,14 @@ class PPATargetChecker:
             "checks": checks,
             "suggestions": suggestions,
             "ppa_analysis": {
-                "area": area_result,
-                "performance": performance_result,
-                "power": power_result,
-            }
+                key: value
+                for key, value in (
+                    ("area", area_result),
+                    ("performance", performance_result if "min_freq_mhz" in targets else {}),
+                    ("power", power_result),
+                )
+                if value
+            },
         }
 
     def _generate_suggestions(
@@ -177,8 +193,10 @@ class PPATargetChecker:
                 elif metric == "power":
                     suggestions.extend(self._suggest_power_optimizations(rtl_code, power_result))
 
-        # Always add general best practices
-        suggestions.extend(self._suggest_general_improvements(rtl_code))
+        # Text-only style hints are secondary and noisy for generated RTL.
+        # Only emit them when a measured/checked target needs attention.
+        if any(check["status"] in {"warning", "fail"} for check in checks):
+            suggestions.extend(self._suggest_general_improvements(rtl_code))
 
         # Sort by impact
         impact_order = {"high": 0, "medium": 1, "low": 2}
@@ -236,37 +254,17 @@ class PPATargetChecker:
         """Suggest performance optimizations."""
         suggestions = []
 
-        # Check critical path depth
-        if perf_result["critical_path_depth"] > 10:
+        # Suggestions must be tied to measured backend data.  Do not infer
+        # fake logic depth, adder width, or mux depth from RTL text.
+        delay_ps = perf_result.get("critical_path_delay_ps")
+        if delay_ps is not None:
             suggestions.append({
                 "category": "performance",
                 "type": "pipelining",
-                "suggestion": f"Long critical path ({perf_result['critical_path_depth']} levels): Add pipeline stages to break critical path.",
+                "suggestion": f"Measured critical path is {delay_ps:.2f} ps; consider pipelining or logic factoring.",
                 "impact": "high",
                 "trade_off": "Increases latency and area",
-                "estimated_improvement": "30-50% frequency improvement"
-            })
-
-        # Check for wide adders
-        if perf_result["adder_bits"] > 16:
-            suggestions.append({
-                "category": "performance",
-                "type": "adder_optimization",
-                "suggestion": f"Wide adder ({perf_result['adder_bits']}-bit): Consider carry-lookahead or carry-save adder.",
-                "impact": "medium",
-                "trade_off": "Increases area",
-                "estimated_improvement": "20-30% delay reduction"
-            })
-
-        # Check MUX depth
-        if perf_result["mux_levels"] > 4:
-            suggestions.append({
-                "category": "performance",
-                "type": "mux_optimization",
-                "suggestion": f"Deep MUX tree ({perf_result['mux_levels']} levels): Consider parallel prefix or tree-based MUX.",
-                "impact": "medium",
-                "trade_off": "Increases area",
-                "estimated_improvement": "15-25% delay reduction"
+                "estimated_improvement": "Must be re-measured with the same tool flow"
             })
 
         return suggestions
@@ -371,8 +369,41 @@ class PPATargetCheckerTool(Tool):
                 issues=["Missing input: rtl_code"]
             )
 
+        performance_result = None
+        if "min_freq_mhz" in targets:
+            liberty = (ctx.inputs.get("liberty") or "").strip()
+            liberty_file = (ctx.inputs.get("liberty_file") or "").strip()
+            liberty_files = ctx.inputs.get("liberty_files") or []
+            if not (liberty or liberty_file or liberty_files):
+                return ToolResult(
+                    result={
+                        "status": "error",
+                        "message": "Performance target checking requires a Liberty library",
+                        "required_inputs": ["liberty or liberty_file"],
+                    },
+                    issues=["Refusing heuristic performance target check"],
+                )
+            from ..synth_timing import TimingAnalysisTool
+
+            timing_ctx = ToolContext(
+                task=ctx.task,
+                inputs={
+                    "reg_code": rtl_code,
+                    "target_freq_mhz": targets["min_freq_mhz"],
+                    "liberty": liberty,
+                    "liberty_file": liberty_file,
+                    "liberty_files": liberty_files,
+                    "sdc": ctx.inputs.get("sdc", ""),
+                    "output_dir": ctx.inputs.get("output_dir"),
+                },
+            )
+            timing_result = TimingAnalysisTool(require_sta=True).run(timing_ctx)
+            if timing_result.result.get("status") != "success":
+                return timing_result
+            performance_result = timing_result.result
+
         checker = PPATargetChecker()
-        result = checker.check(rtl_code, targets)
+        result = checker.check(rtl_code, targets, performance_result=performance_result)
 
         return ToolResult(
             result={

@@ -1047,6 +1047,7 @@ def chipagent_run_physical_flow_asap7(
     clock_period: float = 310.0,
     core_utilization: int = 10,
     place_density: float = 0.20,
+    corner: str = "WC",
     output_dir: Optional[str] = None,
     timeout: int = 1800,
     cache: bool = True,
@@ -1065,7 +1066,10 @@ def chipagent_run_physical_flow_asap7(
         clock_period: ASAP7 SDC clock period, default 310
         core_utilization: ORFS core utilization percentage
         place_density: ORFS placement density
-        output_dir: Directory for ORFS work tree, logs, reports, and results
+        corner: ASAP7 analysis corner: WC (SS), TC (TT), or BC (FF)
+        output_dir: Directory for ORFS work tree, logs, reports, and results.
+            When omitted, ChipAgent creates a sequential directory such as
+            generated/physical/001_dut.
         timeout: Flow timeout in seconds
         cache: Reuse an existing matching physical result when possible
         clean: Remove previous ORFS work tree before running
@@ -1086,6 +1090,7 @@ def chipagent_run_physical_flow_asap7(
             "clock_period": clock_period,
             "core_utilization": core_utilization,
             "place_density": place_density,
+            "corner": corner,
             "output_dir": output_dir,
             "timeout": timeout,
             "cache": cache,
@@ -2252,14 +2257,18 @@ def chipagent_estimate_area(
 def chipagent_estimate_performance(
     reg_code: str,
     target_freq_mhz: Optional[float] = None,
-    module_name: str = "dut"
+    module_name: str = "dut",
+    liberty: Optional[str] = None,
+    liberty_file: Optional[str] = None,
+    liberty_files: Optional[list[str]] = None,
+    sdc: Optional[str] = None,
+    output_dir: Optional[str] = None,
 ) -> str:
-    """Estimate performance metrics from RTL code structure (no EDA tools required).
+    """Measure performance using Yosys technology mapping and OpenSTA.
 
-    Analyzes critical path to estimate:
-    - Maximum clock frequency
-    - Critical path depth
-    - Timing risk assessment
+    This API never fabricates Fmax from RTL text. A Liberty library and real
+    Yosys/OpenSTA backends are required. ``target_freq_mhz`` is used to create
+    a clock constraint when ``sdc`` is not supplied.
 
     Args:
         reg_code: RTL code (Verilog/SystemVerilog)
@@ -2270,15 +2279,20 @@ def chipagent_estimate_performance(
         Performance estimation report with frequency and timing analysis
     """
     from .tools.base import ToolContext
-    from .tools.ppa.performance_estimator import PerformanceEstimatorTool
+    from .tools.synth_timing import TimingAnalysisTool
     from .models import TaskObject
 
-    tool = PerformanceEstimatorTool()
+    tool = TimingAnalysisTool(require_sta=True)
     ctx = ToolContext(
         task=TaskObject(task_type="ppa_analysis", module_name=module_name, description=""),
         inputs={
-            "rtl_code": reg_code,
+            "reg_code": reg_code,
             "target_freq_mhz": target_freq_mhz,
+            "liberty": liberty or "",
+            "liberty_file": liberty_file or "",
+            "liberty_files": liberty_files or [],
+            "sdc": sdc or "",
+            "output_dir": output_dir,
         },
     )
     result = tool.run(ctx)
@@ -2329,7 +2343,12 @@ def chipagent_check_ppa_targets(
     min_freq_mhz: Optional[float] = None,
     max_power_mw: Optional[float] = None,
     clock_freq_mhz: float = 100.0,
-    module_name: str = "dut"
+    module_name: str = "dut",
+    liberty: Optional[str] = None,
+    liberty_file: Optional[str] = None,
+    liberty_files: Optional[list[str]] = None,
+    sdc: Optional[str] = None,
+    output_dir: Optional[str] = None,
 ) -> str:
     """Comprehensive PPA analysis with target checking and optimization suggestions.
 
@@ -2371,6 +2390,11 @@ def chipagent_check_ppa_targets(
         inputs={
             "rtl_code": reg_code,
             "targets": targets,
+            "liberty": liberty or "",
+            "liberty_file": liberty_file or "",
+            "liberty_files": liberty_files or [],
+            "sdc": sdc or "",
+            "output_dir": output_dir,
         },
     )
     result = tool.run(ctx)

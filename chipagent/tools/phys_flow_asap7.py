@@ -40,7 +40,12 @@ class ASAP7PhysicalFlowTool(Tool):
                 install_url="https://openroad-flow-scripts.readthedocs.io/en/latest/user/DockerShell.html",
             )
 
-        out = Path(ctx.inputs.get("output_dir") or Path("generated") / "physical" / module_name)
+        requested_output = ctx.inputs.get("output_dir")
+        out = (
+            Path(requested_output)
+            if requested_output
+            else _next_numbered_output(Path("generated") / "physical", module_name)
+        )
         work = out / "orfs-work"
         out.mkdir(parents=True, exist_ok=True)
 
@@ -48,6 +53,12 @@ class ASAP7PhysicalFlowTool(Tool):
         clock_period = float(ctx.inputs.get("clock_period") or 310.0)
         core_utilization = int(ctx.inputs.get("core_utilization") or 10)
         place_density = float(ctx.inputs.get("place_density") or 0.20)
+        corner = str(ctx.inputs.get("corner") or "WC").upper()
+        if corner not in {"BC", "TC", "WC"}:
+            return ToolResult(
+                result={"status": "error", "message": f"Invalid ASAP7 corner: {corner}"},
+                issues=["Invalid input: corner (expected BC, TC, or WC)"],
+            )
         manifest = _manifest(
             reg_code=reg_code,
             module_name=module_name,
@@ -56,6 +67,7 @@ class ASAP7PhysicalFlowTool(Tool):
             clock_period=clock_period,
             core_utilization=core_utilization,
             place_density=place_density,
+            corner=corner,
         )
         manifest_path = out / "flow_manifest.json"
         cache_enabled = bool(ctx.inputs.get("cache", True))
@@ -73,14 +85,17 @@ class ASAP7PhysicalFlowTool(Tool):
         for subdir in ("logs", "reports", "results", "objects"):
             (work / subdir).mkdir(parents=True, exist_ok=True)
 
-        rtl_path = design_src / f"{module_name}.v"
+        # The API accepts SystemVerilog RTL (for example always_comb/logic).
+        # ORFS selects its parser standard from the source extension, so writing
+        # this payload as .v incorrectly forces Verilog-2005 elaboration.
+        rtl_path = design_src / f"{module_name}.sv"
         sdc_path = design_cfg / "constraint.sdc"
         config_path = design_cfg / "config.mk"
         run_log = out / "orfs_run.log"
         rtl_path.write_text(reg_code + "\n", encoding="utf-8")
         sdc_path.write_text(_sdc(module_name, clock_port, clock_period), encoding="utf-8")
         config_path.write_text(
-            _config(module_name, core_utilization, place_density),
+            _config(module_name, core_utilization, place_density, corner),
             encoding="utf-8",
         )
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -148,6 +163,16 @@ class ASAP7PhysicalFlowTool(Tool):
 
         status = "timeout" if timed_out else ("success" if returncode == 0 else "failed")
         diagnosis = _diagnose(report, status=status, timeout=timeout)
+        qor = _collect_qor(work)
+        overview = _build_overview(
+            status=status,
+            manifest=manifest,
+            qor=qor,
+            diagnosis=diagnosis,
+        )
+        simple_report = out / "SUMMARY.md"
+        simple_report.write_text(_summary_markdown(module_name, overview, artifacts), encoding="utf-8")
+        artifacts["simple_report"] = str(simple_report)
 
         return ToolResult(
             result={
@@ -164,7 +189,8 @@ class ASAP7PhysicalFlowTool(Tool):
                     command=cmd,
                     artifacts=artifacts,
                 ),
-                "qor": _collect_qor(work),
+                "overview": overview,
+                "qor": qor,
                 "summary": _summarize(report),
                 "diagnosis": diagnosis,
                 "report_tail": "\n".join(report.splitlines()[-80:]),
@@ -173,11 +199,17 @@ class ASAP7PhysicalFlowTool(Tool):
         )
 
 
-def _config(module_name: str, core_utilization: int, place_density: float) -> str:
+def _config(
+    module_name: str,
+    core_utilization: int,
+    place_density: float,
+    corner: str = "WC",
+) -> str:
     return f"""export PLATFORM = asap7
 export DESIGN_NAME = {module_name}
+export CORNER = {corner}
 
-export VERILOG_FILES = $(sort $(wildcard $(DESIGN_HOME)/src/$(DESIGN_NAME)/*.v))
+export VERILOG_FILES = $(sort $(wildcard $(DESIGN_HOME)/src/$(DESIGN_NAME)/*.v) $(wildcard $(DESIGN_HOME)/src/$(DESIGN_NAME)/*.sv))
 export SDC_FILE = $(DESIGN_HOME)/$(PLATFORM)/$(DESIGN_NAME)/constraint.sdc
 
 export CORE_UTILIZATION = {core_utilization}
@@ -187,13 +219,27 @@ export PLACE_DENSITY = {place_density}
 
 export SKIP_LAST_GASP ?= 1
 export SYNTH_USE_SYN = 1
-export SKIP_REPORT_METRICS ?= 1
+export SKIP_REPORT_METRICS = 0
 export SKIP_CTS_REPAIR_TIMING ?= 1
 export REMOVE_ABC_BUFFERS ?= 1
 export SKIP_INCREMENTAL_REPAIR ?= 1
 export GPL_TIMING_DRIVEN ?= 0
 export GPL_ROUTING_DRIVEN ?= 0
 """
+
+
+def _next_numbered_output(parent: Path, name: str) -> Path:
+    """Allocate a human-sortable run directory such as ``003_DecodePipe``."""
+    parent.mkdir(parents=True, exist_ok=True)
+    highest = 0
+    pattern = re.compile(r"^(\d{3})_")
+    for child in parent.iterdir():
+        if not child.is_dir():
+            continue
+        match = pattern.match(child.name)
+        if match:
+            highest = max(highest, int(match.group(1)))
+    return parent / f"{highest + 1:03d}_{name}"
 
 
 def _manifest(
@@ -205,6 +251,7 @@ def _manifest(
     clock_period: float,
     core_utilization: int,
     place_density: float,
+    corner: str = "WC",
 ) -> Dict[str, Any]:
     payload = {
         "platform": "asap7",
@@ -214,6 +261,7 @@ def _manifest(
         "clock_period": clock_period,
         "core_utilization": core_utilization,
         "place_density": place_density,
+        "corner": corner,
         "openroad_image": image,
         "flow": "openroad-orfs",
     }
@@ -230,6 +278,7 @@ def _manifest(
             "clock_period": clock_period,
             "core_utilization": core_utilization,
             "place_density": place_density,
+            "corner": corner,
         },
     }
 
@@ -252,13 +301,24 @@ def _cache_valid(out: Path, work: Path, manifest: Dict[str, Any]) -> bool:
 def _cached_result(out: Path, work: Path, module_name: str, manifest: Dict[str, Any]) -> ToolResult:
     artifacts = _collect_artifacts(out, work, module_name)
     artifacts.update({
-        "rtl": str(work / "src" / module_name / f"{module_name}.v"),
+        "rtl": str(work / "src" / module_name / f"{module_name}.sv"),
         "sdc": str(work / "designs" / "asap7" / module_name / "constraint.sdc"),
         "config.mk": str(work / "designs" / "asap7" / module_name / "config.mk"),
         "run.log": str(out / "orfs_run.log"),
         "manifest.json": str(out / "flow_manifest.json"),
     })
     report = (out / "orfs_run.log").read_text(encoding="utf-8", errors="replace")
+    qor = _collect_qor(work)
+    diagnosis = _diagnose(report, status="success", timeout=0)
+    overview = _build_overview(
+        status="success",
+        manifest=manifest,
+        qor=qor,
+        diagnosis=diagnosis,
+    )
+    simple_report = out / "SUMMARY.md"
+    simple_report.write_text(_summary_markdown(module_name, overview, artifacts), encoding="utf-8")
+    artifacts["simple_report"] = str(simple_report)
     return ToolResult(
         result={
             "status": "success",
@@ -273,9 +333,10 @@ def _cached_result(out: Path, work: Path, module_name: str, manifest: Dict[str, 
                 tool_available=True,
                 artifacts=artifacts,
             ),
-            "qor": _collect_qor(work),
+            "overview": overview,
+            "qor": qor,
             "summary": _summarize(report),
-            "diagnosis": _diagnose(report, status="success", timeout=0),
+            "diagnosis": diagnosis,
             "report_tail": "\n".join(report.splitlines()[-80:]),
         },
         issues=[],
@@ -349,6 +410,22 @@ def _collect_qor(work: Path) -> Dict[str, Any]:
         "sequential_cell_count": final.get("finish__design__instance__count__class:sequential_cell"),
         "clock_buffer_count": final.get("finish__design__instance__count__class:clock_buffer"),
         "timing_repair_buffer_count": final.get("finish__design__instance__count__class:timing_repair_buffer"),
+        "setup_tns_ps": final.get("finish__timing__setup__tns"),
+        "hold_tns_ps": final.get("finish__timing__hold__tns"),
+        "setup_worst_slack_ps": final.get("finish__timing__setup__ws"),
+        "hold_worst_slack_ps": final.get("finish__timing__hold__ws"),
+        "setup_violation_count": final.get("finish__timing__drv__setup_violation_count"),
+        "hold_violation_count": final.get("finish__timing__drv__hold_violation_count"),
+        "core_clock_fmax_mhz": _hz_to_mhz(
+            final.get("finish__timing__fmax__clock:core_clock")
+        ),
+        "virtual_io_clock_fmax_mhz": _hz_to_mhz(
+            final.get("finish__timing__fmax__clock:vclk_core_clock")
+        ),
+        "reported_fmax_mhz": _hz_to_mhz(final.get("finish__timing__fmax")),
+        "setup_clock_skew_ps": final.get("finish__clock__skew__setup"),
+        "hold_clock_skew_ps": final.get("finish__clock__skew__hold"),
+        "total_power_w": final.get("finish__power__total"),
         "placement_utilization": place.get("detailedplace__utilization__before__dpl"),
         "placement_violations": place.get("detailedplace__design__violations"),
         "estimated_wirelength": cts.get("cts__route__wirelength__estimated")
@@ -364,6 +441,162 @@ def _collect_qor(work: Path) -> Dict[str, Any]:
         "flow_warnings": final.get("finish__flow__warnings__count"),
         "flow_errors": final.get("finish__flow__errors__count"),
     }
+
+
+def _hz_to_mhz(value: Any) -> float | None:
+    try:
+        return float(value) / 1_000_000.0
+    except (TypeError, ValueError):
+        return None
+
+
+def _build_overview(
+    *,
+    status: str,
+    manifest: Dict[str, Any],
+    qor: Dict[str, Any],
+    diagnosis: Dict[str, Any],
+) -> Dict[str, Any]:
+    params = manifest.get("parameters") or {}
+    period_ps = _number(params.get("clock_period"))
+    target_mhz = (1_000_000.0 / period_ps) if period_ps and period_ps > 0 else None
+    setup_slack = _number(qor.get("setup_worst_slack_ps"))
+    hold_slack = _number(qor.get("hold_worst_slack_ps"))
+    setup_violations = _number(qor.get("setup_violation_count"))
+    hold_violations = _number(qor.get("hold_violation_count"))
+    drc_errors = _number(qor.get("route_drc_errors"))
+    timing_available = setup_slack is not None and hold_slack is not None
+
+    if status != "success":
+        verdict = "FAIL"
+        headline = f"Physical flow failed at {diagnosis.get('stage') or 'an unknown stage'}."
+    elif not timing_available:
+        verdict = "UNKNOWN"
+        headline = "Layout completed, but post-route timing metrics are unavailable."
+    else:
+        passed = (
+            setup_slack >= 0
+            and hold_slack >= 0
+            and (setup_violations in {None, 0})
+            and (hold_violations in {None, 0})
+            and (drc_errors in {None, 0})
+        )
+        verdict = "PASS" if passed else "FAIL"
+        target_text = f"{target_mhz:.1f} MHz" if target_mhz is not None else "the target clock"
+        headline = (
+            f"Post-route design meets {target_text} at the {params.get('corner', 'unspecified')} corner."
+            if passed
+            else f"Post-route design does not meet {target_text} at the {params.get('corner', 'unspecified')} corner."
+        )
+
+    return {
+        "verdict": verdict,
+        "headline": headline,
+        "target": {
+            "clock_period_ps": period_ps,
+            "frequency_mhz": target_mhz,
+            "corner": params.get("corner"),
+        },
+        "timing": {
+            "setup_slack_ps": setup_slack,
+            "hold_slack_ps": hold_slack,
+            "setup_tns_ps": qor.get("setup_tns_ps"),
+            "hold_tns_ps": qor.get("hold_tns_ps"),
+            "core_clock_fmax_mhz": qor.get("core_clock_fmax_mhz"),
+            "setup_violations": qor.get("setup_violation_count"),
+            "hold_violations": qor.get("hold_violation_count"),
+        },
+        "physical": {
+            "drc_errors": qor.get("route_drc_errors"),
+            "antenna_violating_nets": qor.get("antenna_violating_nets"),
+            "standard_cell_area_um2": qor.get("instance_area"),
+            "placement_utilization_percent": qor.get("placement_utilization"),
+            "total_power_mw": (
+                float(qor["total_power_w"]) * 1000.0
+                if qor.get("total_power_w") is not None
+                else None
+            ),
+        },
+        "next_action": (
+            "No timing or routing fix is required for this target."
+            if verdict == "PASS"
+            else diagnosis.get("suggested_fix")
+            or "Inspect negative slack or physical violations before sign-off."
+        ),
+    }
+
+
+def _summary_markdown(
+    module_name: str,
+    overview: Dict[str, Any],
+    artifacts: Dict[str, str],
+) -> str:
+    target = overview["target"]
+    timing = overview["timing"]
+    physical = overview["physical"]
+
+    def value(item: Any, unit: str = "") -> str:
+        if item is None:
+            return "N/A"
+        if isinstance(item, float):
+            return f"{item:.3f}{unit}"
+        return f"{item}{unit}"
+
+    return f"""# ChipAgent Result: {module_name}
+
+## Verdict
+
+**{overview['verdict']} — {overview['headline']}**
+
+{overview['next_action']}
+
+## What was tested
+
+| Item | Value |
+|---|---:|
+| Target frequency | {value(target.get('frequency_mhz'), ' MHz')} |
+| Clock period | {value(target.get('clock_period_ps'), ' ps')} |
+| PVT corner | {value(target.get('corner'))} |
+| Analysis | Post-route STA with extracted parasitics |
+
+## Timing
+
+| Check | Result | Meaning |
+|---|---:|---|
+| Setup slack | {value(timing.get('setup_slack_ps'), ' ps')} | PASS when >= 0 |
+| Hold slack | {value(timing.get('hold_slack_ps'), ' ps')} | PASS when >= 0 |
+| Setup TNS | {value(timing.get('setup_tns_ps'), ' ps')} | PASS when 0 |
+| Hold TNS | {value(timing.get('hold_tns_ps'), ' ps')} | PASS when 0 |
+| Core-clock Fmax | {value(timing.get('core_clock_fmax_mhz'), ' MHz')} | Tool-reported estimate |
+| Setup violations | {value(timing.get('setup_violations'))} | PASS when 0 |
+| Hold violations | {value(timing.get('hold_violations'))} | PASS when 0 |
+
+## Physical checks
+
+| Check | Result | Meaning |
+|---|---:|---|
+| Routing DRC errors | {value(physical.get('drc_errors'))} | PASS when 0 |
+| Antenna violating nets | {value(physical.get('antenna_violating_nets'))} | PASS when 0 |
+| Standard-cell area | {value(physical.get('standard_cell_area_um2'), ' um^2')} | Excludes fill cells |
+| Placement utilization | {value(physical.get('placement_utilization_percent'), '%')} | Informational |
+| Total power | {value(physical.get('total_power_mw'), ' mW')} | Corner/activity dependent |
+
+## Detailed artifacts
+
+- Final DEF: {artifacts.get('final_def', 'N/A')}
+- Final GDS: {artifacts.get('final_gds', 'N/A')}
+- Final ODB: {artifacts.get('final_odb', 'N/A')}
+- Raw ORFS log: {artifacts.get('run.log', 'N/A')}
+
+The JSON result keeps all raw QoR fields for debugging; this file is the recommended starting point.
+"""
+
+
+def _number(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _read_json(path: Path) -> Dict[str, Any]:
