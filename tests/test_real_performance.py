@@ -2,6 +2,21 @@ import json
 import pytest
 
 
+def test_opensta_empty_or_unmapped_report_fails_closed():
+    from chipagent.tools.synth_timing import _invalid_sta_reasons
+
+    reasons = _invalid_sta_reasons(
+        "Warning 198: module $_DFF_P_ not found. Creating black box.\n"
+        "Warning 366: port 'clk' not found.\n"
+        "No paths found.\n",
+        {"critical_path_delay_ns": None},
+    )
+
+    assert "SDC references a clock port that does not exist" in reasons
+    assert "Sequential cells are unmapped because the Liberty set lacks DFF cells" in reasons
+    assert "OpenSTA found no constrained timing paths" in reasons
+
+
 RTL = """
 module passthrough(input logic clk, input logic d, output logic q);
   always_ff @(posedge clk) q <= d;

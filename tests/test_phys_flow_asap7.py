@@ -5,6 +5,7 @@ from chipagent.tools.phys_flow_asap7 import (
     _collect_qor,
     _config,
     _next_numbered_output,
+    _sdc,
 )
 
 
@@ -14,7 +15,166 @@ def test_orfs_config_accepts_verilog_and_systemverilog_sources():
     assert "$(wildcard $(DESIGN_HOME)/src/$(DESIGN_NAME)/*.v)" in config
     assert "$(wildcard $(DESIGN_HOME)/src/$(DESIGN_NAME)/*.sv)" in config
     assert "export CORNER = WC" in config
+    assert "export ASAP7_USE_VT = RVT" in config
     assert "export SKIP_REPORT_METRICS = 0" in config
+
+
+def test_orfs_config_adds_macro_collateral():
+    config = _config(
+        "ScalarRegisterManager", 30, 0.35, "WC", has_macros=True
+    )
+
+    assert "ADDITIONAL_LEFS" in config
+    assert "ADDITIONAL_LIBS" in config
+    assert "GDS_ALLOW_EMPTY = fakeram.*" in config
+
+
+def test_orfs_closure_config_enables_timing_repairs():
+    config = _config(
+        "ScalarRegisterManager",
+        30,
+        0.35,
+        "WC",
+        timing_effort="closure",
+        setup_slack_margin=0.02,
+    )
+
+    assert "export GPL_TIMING_DRIVEN = 1" in config
+    assert "export SKIP_CTS_REPAIR_TIMING = 0" in config
+    assert "export SKIP_INCREMENTAL_REPAIR = 0" in config
+    assert "export SKIP_LAST_GASP = 0" in config
+    assert "export REMOVE_ABC_BUFFERS = 0" in config
+    assert "export SETUP_SLACK_MARGIN = 0.02" in config
+
+
+def test_orfs_closure_no_cts_keeps_later_timing_repairs():
+    config = _config(
+        "ScalarRegisterManager",
+        30,
+        0.35,
+        "WC",
+        timing_effort="closure_no_cts",
+    )
+
+    assert "export GPL_TIMING_DRIVEN = 1" in config
+    assert "export SKIP_CTS_REPAIR_TIMING = 1" in config
+    assert "export SKIP_INCREMENTAL_REPAIR = 0" in config
+    assert "export SKIP_LAST_GASP = 0" in config
+
+
+def test_orfs_config_can_tighten_abc_delay_target():
+    config = _config(
+        "GpuCore",
+        30,
+        0.35,
+        "WC",
+        abc_clock_period_ps=700.0,
+    )
+
+    assert "export ABC_CLOCK_PERIOD_IN_PS = 700.0" in config
+
+
+def test_orfs_config_can_select_yosys():
+    config = _config(
+        "GpuCore",
+        30,
+        0.35,
+        "WC",
+        synthesis_engine="yosys",
+    )
+
+    assert "export SYNTH_USE_SYN = 0" in config
+
+
+def test_orfs_config_can_select_sv2v_lowered_rtl():
+    config = _config("Fp32FmaLane", 30, 0.35, "WC", sv_frontend="sv2v")
+
+    assert "$(DESIGN_NAME).sv2v.v" in config
+    assert "*.sv)" not in config
+
+
+def test_orfs_config_can_enable_top_level_retiming():
+    config = _config(
+        "Fp32FmaLane", 30, 0.35, "WC", enable_retiming=True
+    )
+
+    assert "export SYNTH_RETIME_MODULES = Fp32FmaLane" in config
+
+
+def test_orfs_config_can_enable_physical_arithmetic_selection():
+    config = _config(
+        "Fp32FmaLane", 30, 0.35, "WC", swap_arithmetic_operators=True
+    )
+
+    assert "export OPENROAD_HIERARCHICAL = 1" in config
+    assert "export SWAP_ARITH_OPERATORS = 1" in config
+    assert "KOGGE_STONE" in config
+    assert "BOOTH,BASE" in config
+
+
+def test_orfs_config_can_select_low_vt_cells():
+    config = _config("Fp32FmaLane", 30, 0.35, "WC", cell_vt="LVT")
+
+    assert "export ASAP7_USE_VT = LVT" in config
+
+
+def test_diagnose_emulated_openroad_illegal_instruction():
+    from chipagent.tools.phys_flow_asap7 import _diagnose
+
+    diagnosis = _diagnose(
+        "Error: cts.tcl, 81 child killed: illegal instruction",
+        status="failed",
+        timeout=300,
+    )
+
+    assert "amd64" in diagnosis["root_cause"]
+    assert "closure_no_cts" in diagnosis["suggested_fix"]
+
+
+def test_orfs_sdc_can_constrain_max_fanout():
+    sdc = _sdc("ScalarRegisterManager", "clock", 1000.0, max_fanout=10)
+
+    assert "set_max_fanout 10 [current_design]" in sdc
+
+
+def test_diagnose_macro_pin_access_failure():
+    from chipagent.tools.phys_flow_asap7 import _diagnose
+
+    diagnosis = _diagnose(
+        "[ERROR DRT-0073] No access point for u1/we_in (fakeram7_1rw_32x32).",
+        status="failed",
+        timeout=300,
+    )
+
+    assert "LEF pin" in diagnosis["root_cause"]
+    assert "routing tracks" in diagnosis["suggested_fix"]
+
+
+def test_diagnose_macro_pdn_failure():
+    from chipagent.tools.phys_flow_asap7 import _diagnose
+
+    diagnosis = _diagnose(
+        "[ERROR PDN-0233] Failed to generate full power grid.",
+        status="failed",
+        timeout=300,
+    )
+
+    assert "power grid" in diagnosis["root_cause"]
+    assert "SYMMETRY" in diagnosis["suggested_fix"]
+
+
+def test_diagnose_gds_export_failure_without_claiming_route_drc():
+    from chipagent.tools.phys_flow_asap7 import _diagnose, _is_gds_export_failure
+
+    report = """
+DetailedRoute__route__drc_errors 0
+cp: cannot stat 'results/asap7/Fp32FmaLane/base/6_1_merged.gds': No such file or directory
+make: *** [Makefile:703: results/asap7/Fp32FmaLane/base/6_final.gds] Error 1
+"""
+    assert _is_gds_export_failure(report)
+    diagnosis = _diagnose(report, status="partial", timeout=1800)
+    assert "GDS" in diagnosis["root_cause"]
+    assert "DRC errors" not in diagnosis["root_cause"]
 
 
 def test_collect_qor_includes_post_route_timing(tmp_path):
@@ -40,7 +200,32 @@ def test_collect_qor_includes_post_route_timing(tmp_path):
     assert qor["setup_worst_slack_ps"] == 251.747
     assert qor["hold_worst_slack_ps"] == 74.8157
     assert qor["core_clock_fmax_mhz"] == 1910.39
-    assert qor["reported_fmax_mhz"] == 1945.08
+    assert qor["reported_fmax_mhz"] == 1910.39
+
+
+def test_parse_critical_path_separates_cell_and_net_delay():
+    from chipagent.tools.phys_flow_asap7 import _parse_critical_path
+
+    report = """Startpoint: launch_q (rising edge-triggered flip-flop)
+Endpoint: capture_q (rising edge-triggered flip-flop)
+Path Group: core_clock
+Path Type: max
+
+     1    1.00   4.00   20.00   20.00 ^ launch_q/Q (DFFx1)
+                  2.00    3.00   23.00 ^ add/A (AND2x1)
+     1    1.00   5.00   30.00   53.00 ^ add/Y (AND2x1)
+                  2.00    7.00   60.00 ^ capture_q/D (DFFx1)
+                                 60.00   data arrival time
+                                -10.00   slack (VIOLATED)
+"""
+
+    path = _parse_critical_path(report)
+
+    assert path is not None
+    assert path["cell_delay_ps"] == 50.0
+    assert path["net_delay_ps"] == 10.0
+    assert path["cell_count"] == 2
+    assert path["dominant_cell_types"][0]["cell_type"] == "AND2x1"
 
 
 def test_overview_leads_with_plain_pass_fail_result():

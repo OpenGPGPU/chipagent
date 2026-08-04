@@ -366,10 +366,16 @@ write_verilog -noattr mapped.v
 
             target_freq_mhz = ctx.inputs.get("target_freq_mhz")
             default_period_ns = 1000.0 / float(target_freq_mhz) if target_freq_mhz else 10.0
+            clock_port = str(ctx.inputs.get("clock_port") or "clk")
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", clock_port):
+                return ToolResult(
+                    result={"status": "error", "message": f"Invalid clock_port: {clock_port}"},
+                    issues=["Invalid input: clock_port"],
+                )
             sdc_file = tmpdir / "timing.sdc"
             sdc_file.write_text((ctx.inputs.get("sdc") or f"""
-create_clock -name clk -period {default_period_ns:.6f} [get_ports clk]
-set_clock_uncertainty 0.1 [get_clocks clk]
+create_clock -name core_clock -period {default_period_ns:.6f} [get_ports {clock_port}]
+set_clock_uncertainty 0.1 [get_clocks core_clock]
 """).strip() + "\n")
 
             yosys_script = f"""
@@ -439,6 +445,7 @@ report_wns
 
                 # Parse timing results
                 timing = self._parse_sta_output(result.stdout)
+                invalid_reasons = _invalid_sta_reasons(result.stdout, timing)
                 delay_ns = timing.get("critical_path_delay_ns")
                 slack_ns = timing.get("slack")
                 target_period_ns = (
@@ -469,6 +476,23 @@ report_wns
                         "timing.sdc": sdc_file.read_text(),
                     },
                 )
+                if invalid_reasons:
+                    return ToolResult(
+                        result={
+                            "status": "failed",
+                            "message": "OpenSTA produced no trustworthy constrained timing path",
+                            "reasons": invalid_reasons,
+                            **trust_metadata(
+                                source="tool",
+                                tool="opensta",
+                                tool_available=True,
+                                command=command,
+                                artifacts=artifacts,
+                            ),
+                            "report": result.stdout,
+                        },
+                        issues=invalid_reasons,
+                    )
 
                 return ToolResult(
                     result={
@@ -668,3 +692,16 @@ stat
             timing["critical_path_delay_ns"] = max(arrivals)
 
         return timing
+
+
+def _invalid_sta_reasons(output: str, timing: dict) -> list[str]:
+    reasons: list[str] = []
+    if re.search(r"port ['\"][^'\"]+['\"] not found", output, re.IGNORECASE):
+        reasons.append("SDC references a clock port that does not exist")
+    if re.search(r"module\s+\$_DFF[^ ]*\s+not found", output, re.IGNORECASE):
+        reasons.append("Sequential cells are unmapped because the Liberty set lacks DFF cells")
+    if "No paths found." in output:
+        reasons.append("OpenSTA found no constrained timing paths")
+    if timing.get("critical_path_delay_ns") is None:
+        reasons.append("OpenSTA did not report a critical-path arrival time")
+    return list(dict.fromkeys(reasons))

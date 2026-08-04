@@ -32,6 +32,19 @@ if [[ $# -ne 1 ]]; then
   exit 2
 fi
 
+prepare_sv2v() {
+  local version=v0.0.13
+  local expected=552799a1d76cd177b9b4cc63a3e77823a3d2a6eb4ec006569288abeff28e1ff8
+  local archive=.eda-cache/sv2v-Linux.zip
+  mkdir -p .eda-cache
+  if [[ ! -f "$archive" ]] || ! echo "$expected  $archive" | shasum -a 256 -c - >/dev/null 2>&1; then
+    curl --retry 5 --retry-all-errors --connect-timeout 15 -fsSL \
+      "https://github.com/zachjs/sv2v/releases/download/$version/sv2v-Linux.zip" \
+      -o "$archive"
+  fi
+  echo "$expected  $archive" | shasum -a 256 -c -
+}
+
 case "$1" in
   --docker)
     docker build --pull=false \
@@ -45,6 +58,7 @@ case "$1" in
       -t chipagent/tools:latest -f Dockerfile .
     ;;
   --docker-openroad)
+    prepare_sv2v
     build_args=(
       --pull=false
       --platform "${CHIPAGENT_OPENROAD_PLATFORM:-linux/amd64}"

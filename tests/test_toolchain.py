@@ -104,6 +104,18 @@ def test_asap7_physical_flow_cache_helpers(tmp_path):
 
     assert _cache_valid(tmp_path, work, manifest)
 
+    closure_manifest = _manifest(
+        reg_code="module tiny(input clk); endmodule",
+        module_name="tiny",
+        image="chipagent/openroad:latest",
+        clock_port="clk",
+        clock_period=310.0,
+        core_utilization=10,
+        place_density=0.20,
+        timing_effort="closure",
+    )
+    assert closure_manifest["input_hash"] != manifest["input_hash"]
+
     changed = dict(manifest)
     changed["input_hash"] = "different"
     assert not _cache_valid(tmp_path, work, changed)

@@ -18,6 +18,7 @@ venv/
 # Runtime output
 logs/
 generated/
+.eda-cache/
 
 # Editor and operating-system metadata
 .DS_Store

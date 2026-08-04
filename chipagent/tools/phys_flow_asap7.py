@@ -8,7 +8,7 @@ import hashlib
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from chipagent.toolchain import docker_image_status
 from chipagent.tools.base import Tool, ToolContext, ToolResult, missing_tool_result, trust_metadata
@@ -54,10 +54,90 @@ class ASAP7PhysicalFlowTool(Tool):
         core_utilization = int(ctx.inputs.get("core_utilization") or 10)
         place_density = float(ctx.inputs.get("place_density") or 0.20)
         corner = str(ctx.inputs.get("corner") or "WC").upper()
+        cell_vt = str(ctx.inputs.get("cell_vt") or "RVT").upper()
+        if cell_vt not in {"RVT", "LVT", "SLVT"}:
+            return ToolResult(
+                result={"status": "error", "message": f"Invalid ASAP7 cell_vt: {cell_vt}"},
+                issues=["Invalid input: cell_vt (expected RVT, LVT, or SLVT)"],
+            )
+        timing_effort = str(ctx.inputs.get("timing_effort") or "explore").lower()
+        if timing_effort not in {"explore", "closure", "closure_no_cts"}:
+            return ToolResult(
+                result={
+                    "status": "error",
+                    "message": f"Invalid timing_effort: {timing_effort}",
+                },
+                issues=[
+                    "Invalid input: timing_effort "
+                    "(expected explore, closure, or closure_no_cts)"
+                ],
+            )
+        synthesis_engine = str(
+            ctx.inputs.get("synthesis_engine") or "syn"
+        ).lower()
+        if synthesis_engine not in {"syn", "yosys"}:
+            return ToolResult(
+                result={
+                    "status": "error",
+                    "message": f"Invalid synthesis_engine: {synthesis_engine}",
+                },
+                issues=[
+                    "Invalid input: synthesis_engine (expected syn or yosys)"
+                ],
+            )
+        sv_frontend = str(ctx.inputs.get("sv_frontend") or "native").lower()
+        if sv_frontend not in {"native", "sv2v"}:
+            return ToolResult(
+                result={"status": "error", "message": f"Invalid sv_frontend: {sv_frontend}"},
+                issues=["Invalid input: sv_frontend (expected native or sv2v)"],
+            )
+        enable_retiming = bool(ctx.inputs.get("enable_retiming", False))
+        swap_arithmetic_operators = bool(
+            ctx.inputs.get("swap_arithmetic_operators", False)
+        )
+        generate_gds = bool(ctx.inputs.get("generate_gds", True))
+        max_fanout_raw = ctx.inputs.get("max_fanout")
+        max_fanout = int(max_fanout_raw) if max_fanout_raw is not None else None
+        if max_fanout is not None and max_fanout < 2:
+            return ToolResult(
+                result={"status": "error", "message": "max_fanout must be at least 2"},
+                issues=["Invalid input: max_fanout"],
+            )
+        setup_slack_margin = float(ctx.inputs.get("setup_slack_margin") or 0.0)
+        abc_clock_period_raw = ctx.inputs.get("abc_clock_period_ps")
+        abc_clock_period_ps = (
+            float(abc_clock_period_raw)
+            if abc_clock_period_raw is not None
+            else None
+        )
+        if abc_clock_period_ps is not None and abc_clock_period_ps <= 0:
+            return ToolResult(
+                result={
+                    "status": "error",
+                    "message": "abc_clock_period_ps must be positive",
+                },
+                issues=["Invalid input: abc_clock_period_ps"],
+            )
         if corner not in {"BC", "TC", "WC"}:
             return ToolResult(
                 result={"status": "error", "message": f"Invalid ASAP7 corner: {corner}"},
                 issues=["Invalid input: corner (expected BC, TC, or WC)"],
+            )
+        try:
+            macro_lefs = _macro_files(ctx.inputs.get("macro_lefs"), ".lef")
+            macro_libs = _macro_files(ctx.inputs.get("macro_libs"), ".lib")
+        except ValueError as exc:
+            return ToolResult(
+                result={"status": "error", "message": str(exc)},
+                issues=["Invalid macro collateral"],
+            )
+        if bool(macro_lefs) != bool(macro_libs):
+            return ToolResult(
+                result={
+                    "status": "error",
+                    "message": "macro_lefs and macro_libs must both be provided",
+                },
+                issues=["Incomplete macro collateral"],
             )
         manifest = _manifest(
             reg_code=reg_code,
@@ -68,6 +148,18 @@ class ASAP7PhysicalFlowTool(Tool):
             core_utilization=core_utilization,
             place_density=place_density,
             corner=corner,
+            cell_vt=cell_vt,
+            timing_effort=timing_effort,
+            synthesis_engine=synthesis_engine,
+            sv_frontend=sv_frontend,
+            enable_retiming=enable_retiming,
+            swap_arithmetic_operators=swap_arithmetic_operators,
+            generate_gds=generate_gds,
+            max_fanout=max_fanout,
+            setup_slack_margin=setup_slack_margin,
+            abc_clock_period_ps=abc_clock_period_ps,
+            macro_lefs=macro_lefs,
+            macro_libs=macro_libs,
         )
         manifest_path = out / "flow_manifest.json"
         cache_enabled = bool(ctx.inputs.get("cache", True))
@@ -82,6 +174,11 @@ class ASAP7PhysicalFlowTool(Tool):
         design_cfg = work / "designs" / "asap7" / module_name
         design_src.mkdir(parents=True, exist_ok=True)
         design_cfg.mkdir(parents=True, exist_ok=True)
+        macro_dir = design_cfg / "macros"
+        if macro_lefs:
+            macro_dir.mkdir(parents=True, exist_ok=True)
+            for macro_file in [*macro_lefs, *macro_libs]:
+                shutil.copy2(macro_file, macro_dir / macro_file.name)
         for subdir in ("logs", "reports", "results", "objects"):
             (work / subdir).mkdir(parents=True, exist_ok=True)
 
@@ -93,9 +190,26 @@ class ASAP7PhysicalFlowTool(Tool):
         config_path = design_cfg / "config.mk"
         run_log = out / "orfs_run.log"
         rtl_path.write_text(reg_code + "\n", encoding="utf-8")
-        sdc_path.write_text(_sdc(module_name, clock_port, clock_period), encoding="utf-8")
+        sdc_path.write_text(
+            _sdc(module_name, clock_port, clock_period, max_fanout=max_fanout),
+            encoding="utf-8",
+        )
         config_path.write_text(
-            _config(module_name, core_utilization, place_density, corner),
+            _config(
+                module_name,
+                core_utilization,
+                place_density,
+                corner,
+                cell_vt=cell_vt,
+                has_macros=bool(macro_lefs),
+                timing_effort=timing_effort,
+                synthesis_engine=synthesis_engine,
+                sv_frontend=sv_frontend,
+                enable_retiming=enable_retiming,
+                swap_arithmetic_operators=swap_arithmetic_operators,
+                setup_slack_margin=setup_slack_margin,
+                abc_clock_period_ps=abc_clock_period_ps,
+            ),
             encoding="utf-8",
         )
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -123,7 +237,14 @@ class ASAP7PhysicalFlowTool(Tool):
             "-lc",
             (
                 "source /OpenROAD-flow-scripts/env.sh >/dev/null && "
-                f"make DESIGN_CONFIG=./designs/asap7/{module_name}/config.mk"
+                + (
+                    f"sv2v /OpenROAD-flow-scripts/flow/designs/src/{module_name}/{module_name}.sv "
+                    f"> /OpenROAD-flow-scripts/flow/designs/src/{module_name}/{module_name}.sv2v.v && "
+                    if sv_frontend == "sv2v"
+                    else ""
+                )
+                + f"make DESIGN_CONFIG=./designs/asap7/{module_name}/config.mk"
+                + ("" if generate_gds else " GDS_FINAL_FILE=")
             ),
         ]
 
@@ -160,10 +281,26 @@ class ASAP7PhysicalFlowTool(Tool):
             "run.log": str(run_log),
             "manifest.json": str(manifest_path),
         })
+        if sv_frontend == "sv2v":
+            artifacts["lowered_rtl"] = str(design_src / f"{module_name}.sv2v.v")
 
-        status = "timeout" if timed_out else ("success" if returncode == 0 else "failed")
-        diagnosis = _diagnose(report, status=status, timeout=timeout)
         qor = _collect_qor(work)
+        gds_export_only_failure = (
+            not timed_out
+            and returncode != 0
+            and _is_gds_export_failure(report)
+            and qor.get("setup_worst_slack_ps") is not None
+            and qor.get("hold_worst_slack_ps") is not None
+            and Path(artifacts.get("final_def", "")).is_file()
+            and Path(artifacts.get("final_odb", "")).is_file()
+        )
+        status = (
+            "timeout" if timed_out
+            else "success" if returncode == 0
+            else "partial" if gds_export_only_failure
+            else "failed"
+        )
+        diagnosis = _diagnose(report, status=status, timeout=timeout)
         overview = _build_overview(
             status=status,
             manifest=manifest,
@@ -195,7 +332,12 @@ class ASAP7PhysicalFlowTool(Tool):
                 "diagnosis": diagnosis,
                 "report_tail": "\n".join(report.splitlines()[-80:]),
             },
-            issues=[] if returncode == 0 else ["OpenROAD ORFS ASAP7 flow failed"],
+            issues=(
+                [] if returncode == 0
+                else ["GDS export failed after successful post-route analysis"]
+                if gds_export_only_failure
+                else ["OpenROAD ORFS ASAP7 flow failed"]
+            ),
         )
 
 
@@ -204,12 +346,71 @@ def _config(
     core_utilization: int,
     place_density: float,
     corner: str = "WC",
+    cell_vt: str = "RVT",
+    has_macros: bool = False,
+    timing_effort: str = "explore",
+    synthesis_engine: str = "syn",
+    sv_frontend: str = "native",
+    enable_retiming: bool = False,
+    swap_arithmetic_operators: bool = False,
+    setup_slack_margin: float = 0.0,
+    abc_clock_period_ps: float | None = None,
 ) -> str:
+    macro_config = ""
+    if has_macros:
+        macro_config = """
+export ADDITIONAL_LEFS = $(sort $(wildcard $(DESIGN_HOME)/$(PLATFORM)/$(DESIGN_NAME)/macros/*.lef))
+export ADDITIONAL_LIBS = $(sort $(wildcard $(DESIGN_HOME)/$(PLATFORM)/$(DESIGN_NAME)/macros/*.lib))
+export GDS_ALLOW_EMPTY = fakeram.*
+"""
+    if timing_effort in {"closure", "closure_no_cts"}:
+        skip_cts_repair = 1 if timing_effort == "closure_no_cts" else 0
+        timing_config = f"""export SKIP_LAST_GASP = 0
+export SKIP_CTS_REPAIR_TIMING = {skip_cts_repair}
+export REMOVE_ABC_BUFFERS = 0
+export SKIP_INCREMENTAL_REPAIR = 0
+export GPL_TIMING_DRIVEN = 1
+export TNS_END_PERCENT = 100
+export SETUP_SLACK_MARGIN = {setup_slack_margin}
+"""
+    else:
+        timing_config = """export SKIP_LAST_GASP = 1
+export SKIP_CTS_REPAIR_TIMING = 1
+export REMOVE_ABC_BUFFERS = 1
+export SKIP_INCREMENTAL_REPAIR = 1
+export GPL_TIMING_DRIVEN = 0
+"""
+    abc_config = (
+        f"export ABC_CLOCK_PERIOD_IN_PS = {abc_clock_period_ps}\n"
+        if abc_clock_period_ps is not None
+        else ""
+    )
+    synth_use_syn = 1 if synthesis_engine == "syn" else 0
+    retiming_config = (
+        f"export SYNTH_RETIME_MODULES = {module_name}\n"
+        if enable_retiming
+        else ""
+    )
+    arithmetic_config = (
+        "export OPENROAD_HIERARCHICAL = 1\n"
+        "export SWAP_ARITH_OPERATORS = 1\n"
+        "export SYNTH_WRAPPED_ADDERS = KOGGE_STONE,HAN_CARLSON,SKLANSKY,BRENT_KUNG\n"
+        "export SYNTH_WRAPPED_MULTIPLIERS = BOOTH,BASE\n"
+        if swap_arithmetic_operators
+        else ""
+    )
+    verilog_files = (
+        "$(DESIGN_HOME)/src/$(DESIGN_NAME)/$(DESIGN_NAME).sv2v.v"
+        if sv_frontend == "sv2v"
+        else "$(sort $(wildcard $(DESIGN_HOME)/src/$(DESIGN_NAME)/*.v) $(wildcard $(DESIGN_HOME)/src/$(DESIGN_NAME)/*.sv))"
+    )
     return f"""export PLATFORM = asap7
 export DESIGN_NAME = {module_name}
 export CORNER = {corner}
+export ASAP7_USE_VT = {cell_vt}
+{macro_config}
 
-export VERILOG_FILES = $(sort $(wildcard $(DESIGN_HOME)/src/$(DESIGN_NAME)/*.v) $(wildcard $(DESIGN_HOME)/src/$(DESIGN_NAME)/*.sv))
+export VERILOG_FILES = {verilog_files}
 export SDC_FILE = $(DESIGN_HOME)/$(PLATFORM)/$(DESIGN_NAME)/constraint.sdc
 
 export CORE_UTILIZATION = {core_utilization}
@@ -217,15 +418,29 @@ export CORE_ASPECT_RATIO = 1
 export CORE_MARGIN = 0.5
 export PLACE_DENSITY = {place_density}
 
-export SKIP_LAST_GASP ?= 1
-export SYNTH_USE_SYN = 1
-export SKIP_REPORT_METRICS = 0
-export SKIP_CTS_REPAIR_TIMING ?= 1
-export REMOVE_ABC_BUFFERS ?= 1
-export SKIP_INCREMENTAL_REPAIR ?= 1
-export GPL_TIMING_DRIVEN ?= 0
-export GPL_ROUTING_DRIVEN ?= 0
+export SYNTH_USE_SYN = {synth_use_syn}
+{retiming_config}{arithmetic_config}{abc_config}export SKIP_REPORT_METRICS = 0
+{timing_config}
 """
+
+
+def _macro_files(value: Any, suffix: str) -> List[Path]:
+    if value is None:
+        return []
+    raw = [value] if isinstance(value, (str, Path)) else list(value)
+    files: List[Path] = []
+    names = set()
+    for item in raw:
+        path = Path(item).expanduser().resolve()
+        if not path.is_file():
+            raise ValueError(f"Macro file does not exist: {path}")
+        if path.suffix.lower() != suffix:
+            raise ValueError(f"Expected a {suffix} macro file: {path}")
+        if path.name in names:
+            raise ValueError(f"Duplicate macro filename: {path.name}")
+        names.add(path.name)
+        files.append(path)
+    return files
 
 
 def _next_numbered_output(parent: Path, name: str) -> Path:
@@ -252,7 +467,24 @@ def _manifest(
     core_utilization: int,
     place_density: float,
     corner: str = "WC",
+    cell_vt: str = "RVT",
+    timing_effort: str = "explore",
+    synthesis_engine: str = "syn",
+    sv_frontend: str = "native",
+    enable_retiming: bool = False,
+    swap_arithmetic_operators: bool = False,
+    generate_gds: bool = True,
+    max_fanout: int | None = None,
+    setup_slack_margin: float = 0.0,
+    abc_clock_period_ps: float | None = None,
+    macro_lefs: List[Path] | None = None,
+    macro_libs: List[Path] | None = None,
 ) -> Dict[str, Any]:
+    macro_files = [*(macro_lefs or []), *(macro_libs or [])]
+    macro_hashes = {
+        path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in macro_files
+    }
     payload = {
         "platform": "asap7",
         "module_name": module_name,
@@ -262,8 +494,19 @@ def _manifest(
         "core_utilization": core_utilization,
         "place_density": place_density,
         "corner": corner,
+        "cell_vt": cell_vt,
+        "timing_effort": timing_effort,
+        "synthesis_engine": synthesis_engine,
+        "sv_frontend": sv_frontend,
+        "enable_retiming": enable_retiming,
+        "swap_arithmetic_operators": swap_arithmetic_operators,
+        "generate_gds": generate_gds,
+        "max_fanout": max_fanout,
+        "setup_slack_margin": setup_slack_margin,
+        "abc_clock_period_ps": abc_clock_period_ps,
         "openroad_image": image,
         "flow": "openroad-orfs",
+        "macro_hashes": macro_hashes,
     }
     input_hash = hashlib.sha256(
         json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
@@ -279,6 +522,17 @@ def _manifest(
             "core_utilization": core_utilization,
             "place_density": place_density,
             "corner": corner,
+            "cell_vt": cell_vt,
+            "timing_effort": timing_effort,
+            "synthesis_engine": synthesis_engine,
+            "sv_frontend": sv_frontend,
+            "enable_retiming": enable_retiming,
+            "swap_arithmetic_operators": swap_arithmetic_operators,
+            "generate_gds": generate_gds,
+            "max_fanout": max_fanout,
+            "setup_slack_margin": setup_slack_margin,
+            "abc_clock_period_ps": abc_clock_period_ps,
+            "macros": sorted(macro_hashes),
         },
     }
 
@@ -292,9 +546,10 @@ def _cache_valid(out: Path, work: Path, manifest: Dict[str, Any]) -> bool:
         return False
     required = [
         work / "results" / "base" / "6_final.def",
-        work / "results" / "base" / "6_final.gds",
         out / "orfs_run.log",
     ]
+    if (manifest.get("parameters") or {}).get("generate_gds", True):
+        required.append(work / "results" / "base" / "6_final.gds")
     return all(path.exists() for path in required)
 
 
@@ -343,7 +598,17 @@ def _cached_result(out: Path, work: Path, module_name: str, manifest: Dict[str, 
     )
 
 
-def _sdc(module_name: str, clock_port: str, clock_period: float) -> str:
+def _sdc(
+    module_name: str,
+    clock_port: str,
+    clock_period: float,
+    max_fanout: int | None = None,
+) -> str:
+    fanout_constraint = (
+        f"set_max_fanout {max_fanout} [current_design]\n"
+        if max_fanout is not None
+        else ""
+    )
     return f"""current_design {module_name}
 
 set clk_name core_clock
@@ -356,6 +621,7 @@ create_clock -name $clk_name -period $clk_period $clk_port
 set clk_io_name vclk_$clk_name
 create_clock -name $clk_io_name -period $clk_period
 
+{fanout_constraint}
 set non_clock_inputs [all_inputs -no_clocks]
 set_input_delay [expr $clk_period * $clk_io_pct] -clock $clk_io_name $non_clock_inputs
 set_output_delay [expr $clk_period * $clk_io_pct] -clock $clk_io_name [all_outputs]
@@ -403,6 +669,12 @@ def _collect_qor(work: Path) -> Dict[str, Any]:
 
     route_drc = reports / "5_route_drc.rpt"
     route_drc_text = route_drc.read_text(encoding="utf-8", errors="replace") if route_drc.exists() else ""
+    finish_report = reports / "6_finish.rpt"
+    critical_path = _parse_critical_path(
+        finish_report.read_text(encoding="utf-8", errors="replace")
+        if finish_report.exists()
+        else ""
+    )
 
     return {
         "instance_count": final.get("finish__design__instance__count"),
@@ -422,7 +694,15 @@ def _collect_qor(work: Path) -> Dict[str, Any]:
         "virtual_io_clock_fmax_mhz": _hz_to_mhz(
             final.get("finish__timing__fmax__clock:vclk_core_clock")
         ),
-        "reported_fmax_mhz": _hz_to_mhz(final.get("finish__timing__fmax")),
+        # ORFS' aggregate fmax is the maximum over every clock group.  Our SDC
+        # also creates vclk_core_clock for I/O delay constraints, so the
+        # aggregate can misleadingly report that virtual clock instead of the
+        # implemented core clock.  Prefer the real core clock and retain the
+        # virtual value in its explicitly named field above.
+        "reported_fmax_mhz": _hz_to_mhz(
+            final.get("finish__timing__fmax__clock:core_clock")
+            or final.get("finish__timing__fmax")
+        ),
         "setup_clock_skew_ps": final.get("finish__clock__skew__setup"),
         "hold_clock_skew_ps": final.get("finish__clock__skew__hold"),
         "total_power_w": final.get("finish__power__total"),
@@ -440,6 +720,110 @@ def _collect_qor(work: Path) -> Dict[str, Any]:
         "ir_drop_vss_worst": final.get("finish__design_powergrid__drop__worst__net:VSS__corner:default"),
         "flow_warnings": final.get("finish__flow__warnings__count"),
         "flow_errors": final.get("finish__flow__errors__count"),
+        "critical_path": critical_path,
+    }
+
+
+_OUTPUT_PINS = {
+    "Y", "Q", "QN", "S", "SN", "CO", "CON", "Z", "ZN", "O", "ON"
+}
+
+
+def _parse_critical_path(report: str) -> Dict[str, Any] | None:
+    """Break down the worst real-clock setup path from an OpenSTA report.
+
+    OpenSTA reports interconnect delay on the destination input-pin row and
+    cell delay on the output-pin row.  Keeping these separate tells us whether
+    another placement pass can plausibly help or whether RTL/logic depth is the
+    dominant problem.
+    """
+    paths: List[Dict[str, Any]] = []
+    header = re.compile(
+        r"^Startpoint:\s*(?P<start>[^\n]+)\n.*?"
+        r"^Endpoint:\s*(?P<end>[^\n]+)\n.*?"
+        r"^Path Group:\s*(?P<group>\S+)\n"
+        r"^Path Type:\s*(?P<type>\S+)\n(?P<body>.*?^\s*[-\d.]+\s+slack \((?:VIOLATED|MET)\)\s*$)",
+        re.MULTILINE | re.DOTALL,
+    )
+    for match in header.finditer(report):
+        if match.group("type") != "max" or match.group("group") != "core_clock":
+            continue
+        body = match.group("body")
+        slack_match = re.search(r"^\s*([-\d.]+)\s+slack ", body, re.MULTILINE)
+        arrival_match = re.search(r"^\s*([-\d.]+)\s+data arrival time\s*$", body, re.MULTILINE)
+        if not slack_match:
+            continue
+        paths.append({
+            "startpoint": match.group("start").strip(),
+            "endpoint": match.group("end").strip(),
+            "slack_ps": float(slack_match.group(1)),
+            "arrival_ps": float(arrival_match.group(1)) if arrival_match else None,
+            "body": body,
+        })
+    if not paths:
+        return None
+
+    path = min(paths, key=lambda item: item["slack_ps"])
+    start_name = path["startpoint"].split()[0]
+    started = False
+    cell_delay = 0.0
+    net_delay = 0.0
+    cell_count = 0
+    net_count = 0
+    cell_types: Dict[str, Dict[str, float | int]] = {}
+
+    for line in path["body"].splitlines():
+        if started and "data arrival time" in line:
+            break
+        marker = re.search(r"\s[\^v]\s", line)
+        if not marker:
+            continue
+        numeric = re.findall(r"-?\d+(?:\.\d+)?", line[:marker.start()])
+        if len(numeric) < 2:
+            continue
+        delay = float(numeric[-2])
+        desc = line[marker.end():].strip()
+        pin_match = re.search(r"/([^/\s]+)\s+\(([^()]+)\)\s*$", desc)
+        if not pin_match:
+            continue
+        pin, cell_type = pin_match.groups()
+        is_output = pin in _OUTPUT_PINS
+        if not started:
+            started = desc.startswith(start_name + "/") and is_output
+            if not started:
+                continue
+        if is_output:
+            cell_delay += delay
+            cell_count += 1
+            bucket = cell_types.setdefault(cell_type, {"count": 0, "delay_ps": 0.0})
+            bucket["count"] = int(bucket["count"]) + 1
+            bucket["delay_ps"] = float(bucket["delay_ps"]) + delay
+        else:
+            net_delay += delay
+            net_count += 1
+
+    total = cell_delay + net_delay
+    dominant = sorted(
+        (
+            {"cell_type": name, "count": values["count"], "delay_ps": round(float(values["delay_ps"]), 3)}
+            for name, values in cell_types.items()
+        ),
+        key=lambda item: item["delay_ps"],
+        reverse=True,
+    )[:8]
+    return {
+        "startpoint": path["startpoint"],
+        "endpoint": path["endpoint"],
+        "slack_ps": path["slack_ps"],
+        "arrival_ps": path["arrival_ps"],
+        "data_path_delay_ps": round(total, 3),
+        "cell_delay_ps": round(cell_delay, 3),
+        "net_delay_ps": round(net_delay, 3),
+        "cell_delay_percent": round(cell_delay * 100.0 / total, 2) if total else None,
+        "net_delay_percent": round(net_delay * 100.0 / total, 2) if total else None,
+        "cell_count": cell_count,
+        "net_count": net_count,
+        "dominant_cell_types": dominant,
     }
 
 
@@ -467,7 +851,7 @@ def _build_overview(
     drc_errors = _number(qor.get("route_drc_errors"))
     timing_available = setup_slack is not None and hold_slack is not None
 
-    if status != "success":
+    if status not in {"success", "partial"}:
         verdict = "FAIL"
         headline = f"Physical flow failed at {diagnosis.get('stage') or 'an unknown stage'}."
     elif not timing_available:
@@ -488,6 +872,8 @@ def _build_overview(
             if passed
             else f"Post-route design does not meet {target_text} at the {params.get('corner', 'unspecified')} corner."
         )
+        if status == "partial":
+            headline += " DEF/ODB and PPA are valid, but final GDS export failed."
 
     return {
         "verdict": verdict,
@@ -505,6 +891,7 @@ def _build_overview(
             "core_clock_fmax_mhz": qor.get("core_clock_fmax_mhz"),
             "setup_violations": qor.get("setup_violation_count"),
             "hold_violations": qor.get("hold_violation_count"),
+            "critical_path": qor.get("critical_path"),
         },
         "physical": {
             "drc_errors": qor.get("route_drc_errors"),
@@ -534,6 +921,7 @@ def _summary_markdown(
     target = overview["target"]
     timing = overview["timing"]
     physical = overview["physical"]
+    critical = timing.get("critical_path") or {}
 
     def value(item: Any, unit: str = "") -> str:
         if item is None:
@@ -541,6 +929,11 @@ def _summary_markdown(
         if isinstance(item, float):
             return f"{item:.3f}{unit}"
         return f"{item}{unit}"
+
+    dominant_cells = ", ".join(
+        f"{item['cell_type']} ({value(item['delay_ps'], ' ps')})"
+        for item in critical.get("dominant_cell_types", [])[:5]
+    ) or "N/A"
 
     return f"""# ChipAgent Result: {module_name}
 
@@ -570,6 +963,18 @@ def _summary_markdown(
 | Core-clock Fmax | {value(timing.get('core_clock_fmax_mhz'), ' MHz')} | Tool-reported estimate |
 | Setup violations | {value(timing.get('setup_violations'))} | PASS when 0 |
 | Hold violations | {value(timing.get('hold_violations'))} | PASS when 0 |
+
+## Critical path breakdown
+
+| Item | Result |
+|---|---:|
+| Startpoint | {value(critical.get('startpoint'))} |
+| Endpoint | {value(critical.get('endpoint'))} |
+| Data-path delay | {value(critical.get('data_path_delay_ps'), ' ps')} |
+| Cell delay | {value(critical.get('cell_delay_ps'), ' ps')} ({value(critical.get('cell_delay_percent'), '%')}) |
+| Net delay | {value(critical.get('net_delay_ps'), ' ps')} ({value(critical.get('net_delay_percent'), '%')}) |
+| Logic cells on path | {value(critical.get('cell_count'))} |
+| Dominant cell types | {dominant_cells} |
 
 ## Physical checks
 
@@ -625,6 +1030,15 @@ def _diagnose(report: str, *, status: str, timeout: int) -> Dict[str, Any]:
     stage = _failed_stage(report)
     lower = report.lower()
 
+    if status == "partial" and _is_gds_export_failure(report):
+        return {
+            "status": "diagnosed",
+            "stage": stage or "gds_export",
+            "root_cause": "Post-route analysis completed, but the final GDS merge/export artifact was not produced.",
+            "suggested_fix": "Check the KLayout merge log and image installation; timing, power, area, DEF, and ODB remain usable.",
+            "evidence": evidence,
+        }
+
     if status == "timeout":
         return {
             "status": "diagnosed",
@@ -649,6 +1063,41 @@ def _diagnose(report: str, *, status: str, timeout: int) -> Dict[str, Any]:
             "stage": stage or "floorplan",
             "root_cause": "Floorplan core area is too small or the synthesized design has no placeable standard-cell rows.",
             "suggested_fix": "For tiny/combinational designs, add sequential logic or lower core_utilization; for real designs, check that synthesis kept placeable instances.",
+            "evidence": evidence,
+        }
+
+    if "pdn-0233" in lower or "failed to generate full power grid" in lower:
+        return {
+            "status": "diagnosed",
+            "stage": stage or "pdn",
+            "root_cause": "ORFS could not build a complete power grid for one or more macro orientations.",
+            "suggested_fix": "Check macro LEF VDD/VSS geometry and restrict unsupported SYMMETRY rotations before rerunning.",
+            "evidence": evidence,
+        }
+
+    if "drt-0073" in lower or "no access point for" in lower:
+        return {
+            "status": "diagnosed",
+            "stage": stage or "route",
+            "root_cause": "A macro or standard-cell LEF pin has no legal routing access point.",
+            "suggested_fix": "Inspect the failing cell's LEF pin and obstruction geometry; align pin rectangles to legal routing tracks before rerunning.",
+            "evidence": evidence,
+        }
+
+    if "illegal instruction" in lower or "child killed" in lower:
+        return {
+            "status": "diagnosed",
+            "stage": stage,
+            "root_cause": (
+                "The OpenROAD process crashed with an illegal instruction; "
+                "this commonly occurs when an amd64 image runs through "
+                "emulation on an ARM64 host."
+            ),
+            "suggested_fix": (
+                "Use a native ARM64 OpenROAD image, or select "
+                "timing_effort='closure_no_cts' to avoid the crashing CTS "
+                "repair step while retaining later timing repairs."
+            ),
             "evidence": evidence,
         }
 
@@ -677,6 +1126,19 @@ def _diagnose(report: str, *, status: str, timeout: int) -> Dict[str, Any]:
         "suggested_fix": "Inspect artifacts['run.log'] and stage logs under artifacts['logs_dir'].",
         "evidence": evidence,
     }
+
+
+def _is_gds_export_failure(report: str) -> bool:
+    lower = report.lower()
+    return (
+        "cannot stat" in lower
+        and ("6_1_merged.gds" in lower or "6_final.gds" in lower)
+    ) or (
+        "def2stream.py" in lower
+        and "gds" in lower
+        and "make:" in lower
+        and "error" in lower
+    )
 
 
 def _failed_stage(report: str) -> str | None:

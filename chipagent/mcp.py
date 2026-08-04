@@ -39,7 +39,7 @@ import json
 import os
 import html
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 # Force the offline template path for tool execution: Claude Code is the
 # reasoning layer; chipagent's internal LLM calls would just double-bill the
@@ -1048,10 +1048,21 @@ def chipagent_run_physical_flow_asap7(
     core_utilization: int = 10,
     place_density: float = 0.20,
     corner: str = "WC",
+    cell_vt: str = "RVT",
     output_dir: Optional[str] = None,
     timeout: int = 1800,
     cache: bool = True,
     clean: bool = False,
+    macro_lefs: Optional[List[str]] = None,
+    macro_libs: Optional[List[str]] = None,
+    timing_effort: str = "explore",
+    synthesis_engine: str = "syn",
+    sv_frontend: str = "native",
+    enable_retiming: bool = False,
+    swap_arithmetic_operators: bool = False,
+    max_fanout: Optional[int] = None,
+    setup_slack_margin: float = 0.0,
+    abc_clock_period_ps: Optional[float] = None,
 ) -> str:
     """Run the ASAP7 OpenROAD Flow Scripts physical implementation flow.
 
@@ -1067,12 +1078,24 @@ def chipagent_run_physical_flow_asap7(
         core_utilization: ORFS core utilization percentage
         place_density: ORFS placement density
         corner: ASAP7 analysis corner: WC (SS), TC (TT), or BC (FF)
+        cell_vt: ASAP7 threshold-voltage library: RVT, LVT, or SLVT
         output_dir: Directory for ORFS work tree, logs, reports, and results.
             When omitted, ChipAgent creates a sequential directory such as
             generated/physical/001_dut.
         timeout: Flow timeout in seconds
         cache: Reuse an existing matching physical result when possible
         clean: Remove previous ORFS work tree before running
+        macro_lefs: Macro abstract physical views to add to ORFS
+        macro_libs: Matching macro Liberty timing/power views
+        timing_effort: ORFS optimization profile: explore, closure, or closure_no_cts
+        synthesis_engine: ORFS synthesis engine: syn or yosys
+        sv_frontend: SystemVerilog frontend: native or sv2v
+        enable_retiming: Apply ORFS/Yosys ABC sequential retiming to the top module
+        swap_arithmetic_operators: Generate multiple adder/multiplier architectures
+            and let OpenROAD select implementations using physical timing
+        max_fanout: Optional SDC maximum fanout constraint
+        setup_slack_margin: ORFS setup repair margin in nanoseconds
+        abc_clock_period_ps: Optional tighter delay target passed to Yosys/ABC
 
     Returns:
         ORFS flow status with collected DEF/GDS/report artifacts when present
@@ -1091,10 +1114,21 @@ def chipagent_run_physical_flow_asap7(
             "core_utilization": core_utilization,
             "place_density": place_density,
             "corner": corner,
+            "cell_vt": cell_vt,
             "output_dir": output_dir,
             "timeout": timeout,
             "cache": cache,
             "clean": clean,
+            "macro_lefs": macro_lefs,
+            "macro_libs": macro_libs,
+            "timing_effort": timing_effort,
+            "synthesis_engine": synthesis_engine,
+            "sv_frontend": sv_frontend,
+            "enable_retiming": enable_retiming,
+            "swap_arithmetic_operators": swap_arithmetic_operators,
+            "max_fanout": max_fanout,
+            "setup_slack_margin": setup_slack_margin,
+            "abc_clock_period_ps": abc_clock_period_ps,
         },
     ))
     return _tool_result_text(res, "run_physical_flow_asap7")
@@ -2262,6 +2296,7 @@ def chipagent_estimate_performance(
     liberty_file: Optional[str] = None,
     liberty_files: Optional[list[str]] = None,
     sdc: Optional[str] = None,
+    clock_port: str = "clk",
     output_dir: Optional[str] = None,
 ) -> str:
     """Measure performance using Yosys technology mapping and OpenSTA.
@@ -2292,6 +2327,7 @@ def chipagent_estimate_performance(
             "liberty_file": liberty_file or "",
             "liberty_files": liberty_files or [],
             "sdc": sdc or "",
+            "clock_port": clock_port,
             "output_dir": output_dir,
         },
     )

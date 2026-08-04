@@ -1,0 +1,62 @@
+# Native ARM64 OpenROAD Flow Scripts image for Apple-Silicon hosts.
+#
+# Source archives under .eda-cache are pinned by the ORFS gitlinks.  Keeping
+# them in the build context avoids architecture-emulated tools and makes a
+# failed dependency/build layer resumable with Docker's cache.
+FROM ubuntu:22.04 AS builder
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG BUILD_THREADS=12
+
+COPY .eda-cache/OpenROAD-flow-scripts-arm64 /OpenROAD-flow-scripts
+WORKDIR /OpenROAD-flow-scripts
+
+# This official installer has an aarch64-specific KLayout source build path.
+# A flow image does not need a nested Docker daemon.  The upstream installer
+# otherwise downloads Docker CE after all EDA dependencies and makes an
+# unrelated TLS failure discard the entire (long) aarch64 KLayout build layer.
+# KLayout is not on the timing/CTS execution path.  Use explicit sentinels to
+# skip its 40+ minute GUI build here; final stream-out is run with the existing
+# x86 image after native ARM64 routing and STA complete.
+RUN ln -s /bin/true /usr/local/bin/docker && \
+    ln -s /bin/true /usr/local/bin/klayout && \
+    ln -s /bin/true /usr/local/klayout
+RUN ./etc/DependencyInstaller.sh -base -threads=${BUILD_THREADS}
+RUN ./etc/DependencyInstaller.sh -common -threads=${BUILD_THREADS}
+
+# Archive exports omit gitlink contents.  Add the exact yosys-slang nested
+# revisions only after the expensive dependency layers so source fixes do not
+# invalidate that cache.
+COPY .eda-cache/slang-f04e8156 /OpenROAD-flow-scripts/tools/OpenROAD/third-party/slang-elab/third_party/slang
+COPY .eda-cache/fmt-553ec11e /OpenROAD-flow-scripts/tools/OpenROAD/third-party/slang-elab/third_party/fmt
+RUN cmake -S tools/OpenROAD/third-party/slang-elab/third_party/fmt \
+      -B /tmp/fmt-build \
+      -D CMAKE_BUILD_TYPE=Release \
+      -D FMT_TEST=OFF && \
+    cmake --build /tmp/fmt-build --target install -j "${BUILD_THREADS}"
+
+RUN ./tools/OpenROAD/etc/Build.sh \
+      -cmake-build \
+      -dir=/OpenROAD-flow-scripts/tools/OpenROAD/build \
+      -threads=${BUILD_THREADS} \
+      -cmake='-D CMAKE_INSTALL_PREFIX=/OpenROAD-flow-scripts/tools/install/OpenROAD' && \
+    cmake --build tools/OpenROAD/build --target install -j "${BUILD_THREADS}"
+
+RUN cmake -B tools/yosys/build tools/yosys \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_INSTALL_PREFIX=/OpenROAD-flow-scripts/tools/install/yosys \
+      -DYOSYS_SKIP_ABC_SUBMODULE_CHECK=ON && \
+    cmake --build tools/yosys/build --target install -j "${BUILD_THREADS}"
+
+# The runtime intentionally retains the dependency environment produced by
+# the official installer; this first native image prioritizes correctness and
+# reproducibility over image size.
+RUN chmod o+rw -R /OpenROAD-flow-scripts
+ENV PATH="/OpenROAD-flow-scripts/tools/install/OpenROAD/bin:/OpenROAD-flow-scripts/tools/install/yosys/bin:${PATH}"
+WORKDIR /OpenROAD-flow-scripts/flow
+
+RUN uname -m | grep -qx aarch64 && \
+    openroad -version && \
+    yosys -V
+
+CMD ["bash"]
