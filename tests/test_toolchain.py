@@ -1,7 +1,56 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [("x86_64", "amd64"), ("amd64", "amd64"),
+     ("aarch64", "arm64"), ("arm64", "arm64")],
+)
+def test_normalize_docker_architecture(raw, expected):
+    from chipagent.toolchain import normalize_architecture
+
+    assert normalize_architecture(raw) == expected
+
+
+def test_openroad_image_selection_prefers_daemon_native_arm64(monkeypatch):
+    import chipagent.toolchain as toolchain
+
+    monkeypatch.delenv("CHIPAGENT_OPENROAD_IMAGE", raising=False)
+    monkeypatch.setattr(toolchain, "docker_daemon_architecture", lambda: "arm64")
+    monkeypatch.setattr(
+        toolchain,
+        "_inspect_image_architecture",
+        lambda image: "arm64" if image.endswith(":arm64") else "amd64",
+    )
+
+    assert toolchain.configured_openroad_image() == "chipagent/openroad:arm64"
+
+
+def test_openroad_image_selection_honors_explicit_override(monkeypatch):
+    from chipagent.toolchain import configured_openroad_image
+
+    monkeypatch.setenv("CHIPAGENT_OPENROAD_IMAGE", "registry/native-openroad:v1")
+    assert configured_openroad_image() == "registry/native-openroad:v1"
+
+
+def test_docker_image_status_rejects_wrong_architecture(monkeypatch):
+    import chipagent.toolchain as toolchain
+
+    monkeypatch.setattr(toolchain, "which_tool", lambda command: "/usr/bin/docker")
+    monkeypatch.setattr(toolchain, "docker_daemon_architecture", lambda: "arm64")
+    completed = SimpleNamespace(returncode=0, stdout="amd64\n", stderr="")
+    with patch("chipagent.toolchain.subprocess.run", return_value=completed):
+        status = toolchain.docker_image_status("chipagent/openroad:latest")
+
+    assert status["image_available"] is True
+    assert status["architecture_matches"] is False
+    assert status["usable"] is False
+    assert "does not match" in status["error"]
 
 
 def test_toolchain_status_shape():

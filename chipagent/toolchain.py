@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -27,6 +28,8 @@ class ToolSpec:
 
     @property
     def docker_image(self) -> str:
+        if self.docker_image_env == "CHIPAGENT_OPENROAD_IMAGE":
+            return configured_openroad_image()
         return os.environ.get(self.docker_image_env, self.default_docker_image)
 
 
@@ -79,6 +82,66 @@ def which_tool(command: str) -> Optional[str]:
     return None
 
 
+def normalize_architecture(value: Optional[str]) -> Optional[str]:
+    """Normalize host/Docker architecture names to Docker's canonical tags."""
+    if not value:
+        return None
+    normalized = value.strip().lower()
+    return {
+        "x86_64": "amd64",
+        "x64": "amd64",
+        "amd64": "amd64",
+        "aarch64": "arm64",
+        "arm64": "arm64",
+    }.get(normalized, normalized)
+
+
+def docker_daemon_architecture() -> Optional[str]:
+    """Return the Docker daemon architecture (which may differ from the host)."""
+    if not which_tool("docker"):
+        return None
+    try:
+        proc = subprocess.run(
+            ["docker", "info", "--format", "{{.Architecture}}"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception:
+        return None
+    return normalize_architecture(proc.stdout) if proc.returncode == 0 else None
+
+
+def _inspect_image_architecture(image: str) -> Optional[str]:
+    try:
+        proc = subprocess.run(
+            ["docker", "image", "inspect", "--format", "{{.Architecture}}", image],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception:
+        return None
+    return normalize_architecture(proc.stdout) if proc.returncode == 0 else None
+
+
+def configured_openroad_image() -> str:
+    """Select a native OpenROAD image, honoring an explicit user override."""
+    explicit = os.environ.get("CHIPAGENT_OPENROAD_IMAGE")
+    if explicit:
+        return explicit
+    daemon_arch = docker_daemon_architecture()
+    preferred = (
+        "chipagent/openroad:arm64"
+        if daemon_arch == "arm64"
+        else "chipagent/openroad:amd64"
+    )
+    for candidate in (preferred, "chipagent/openroad:latest"):
+        if _inspect_image_architecture(candidate) == daemon_arch:
+            return candidate
+    return preferred
+
+
 def docker_image_status(image: str = "chipagent/tools:latest") -> Dict[str, Any]:
     docker_path = which_tool("docker")
     if not docker_path:
@@ -89,9 +152,10 @@ def docker_image_status(image: str = "chipagent/tools:latest") -> Dict[str, Any]
             "error": "docker CLI not found",
         }
 
+    daemon_arch = docker_daemon_architecture()
     try:
         proc = subprocess.run(
-            ["docker", "image", "inspect", image],
+            ["docker", "image", "inspect", "--format", "{{.Architecture}}", image],
             capture_output=True,
             text=True,
             timeout=10,
@@ -105,18 +169,33 @@ def docker_image_status(image: str = "chipagent/tools:latest") -> Dict[str, Any]
             "error": str(exc),
         }
 
+    image_arch = normalize_architecture(proc.stdout) if proc.returncode == 0 else None
+    architecture_matches = bool(
+        daemon_arch and image_arch and daemon_arch == image_arch
+    )
+    error = (proc.stderr or proc.stdout or "").strip() if proc.returncode != 0 else None
+    if proc.returncode == 0 and not architecture_matches:
+        error = (
+            f"Docker image architecture {image_arch or 'unknown'} does not match "
+            f"daemon architecture {daemon_arch or 'unknown'}"
+        )
     return {
         "cli_available": True,
         "path": docker_path,
         "image": image,
         "image_available": proc.returncode == 0,
-        "error": (proc.stderr or proc.stdout or "").strip() if proc.returncode != 0 else None,
+        "image_architecture": image_arch,
+        "daemon_architecture": daemon_arch,
+        "host_architecture": normalize_architecture(platform.machine()),
+        "architecture_matches": architecture_matches,
+        "usable": proc.returncode == 0 and architecture_matches,
+        "error": error,
     }
 
 
 def _docker_netgen_lvs_available(image: str = "chipagent/tools:latest") -> bool:
     """Detect the circuit LVS Netgen, avoiding Ubuntu's unrelated mesh tool."""
-    if not docker_image_status(image).get("image_available"):
+    if not docker_image_status(image).get("usable"):
         return False
     try:
         proc = subprocess.run(
@@ -135,7 +214,7 @@ def _docker_netgen_lvs_available(image: str = "chipagent/tools:latest") -> bool:
 
 def _docker_command_available(command: str, image: str) -> bool:
     """True when a command is present in a Docker image."""
-    if not docker_image_status(image).get("image_available"):
+    if not docker_image_status(image).get("usable"):
         return False
     try:
         proc = subprocess.run(
@@ -211,7 +290,7 @@ def run_eda_command(
     docker_enabled = os.environ.get("CHIPAGENT_USE_DOCKER_TOOLS", "1").lower() not in {"0", "false", "no"}
     selected_image = image or docker_image_for_command(command[0])
     docker = docker_image_status(selected_image)
-    if docker_enabled and docker.get("cli_available") and docker.get("image_available"):
+    if docker_enabled and docker.get("cli_available") and docker.get("usable"):
         if work_dir:
             try:
                 Path(work_dir).chmod(0o777)
@@ -232,7 +311,7 @@ def toolchain_status() -> Dict[str, Any]:
     docker = docker_image_status()
     docker_images = {
         "base": docker,
-        "openroad": docker_image_status(os.environ.get("CHIPAGENT_OPENROAD_IMAGE", "chipagent/openroad:latest")),
+        "openroad": docker_image_status(configured_openroad_image()),
     }
     spec_by_name = {spec.name: spec for spec in TOOL_SPECS}
     for tool in tools:
@@ -240,7 +319,7 @@ def toolchain_status() -> Dict[str, Any]:
         tool["docker_image"] = spec.docker_image
         tool["available_via_docker"] = bool(
             docker_images["base"].get("cli_available")
-            and docker_image_status(spec.docker_image).get("image_available")
+            and docker_image_status(spec.docker_image).get("usable")
             and spec.in_docker_image
             and _docker_command_available(spec.command, spec.docker_image)
         )
@@ -278,12 +357,12 @@ def toolchain_status() -> Dict[str, Any]:
             },
             "openroad_docker": {
                 "image_env": "CHIPAGENT_OPENROAD_IMAGE",
-                "default_image": "chipagent/openroad:latest",
+                "default_image": configured_openroad_image(),
                 "build": "bash scripts/setup_eda_env.sh --docker-openroad",
                 "base_image": "CHIPAGENT_OPENROAD_BASE_IMAGE=<image-with-openroad-and-sta> bash scripts/setup_eda_env.sh --docker-openroad",
                 "smoke": "bash scripts/setup_eda_env.sh --smoke-openroad",
-                "use": "CHIPAGENT_OPENROAD_IMAGE=chipagent/openroad:latest",
-                "note": "OpenROAD/OpenSTA default to an adapter around openroad/orfs:latest; tools select this image automatically for openroad and sta commands.",
+                "use": "CHIPAGENT_OPENROAD_IMAGE=<native-image-tag>",
+                "note": "OpenROAD/OpenSTA select a daemon-native arm64/amd64 image and reject architecture mismatches.",
             },
             "apt": {
                 "script": "bash scripts/setup_eda_env.sh --apt",

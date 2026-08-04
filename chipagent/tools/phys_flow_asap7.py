@@ -10,7 +10,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List
 
-from chipagent.toolchain import docker_image_status
+from chipagent.toolchain import configured_openroad_image, docker_image_status
 from chipagent.tools.base import Tool, ToolContext, ToolResult, missing_tool_result, trust_metadata
 
 
@@ -31,12 +31,13 @@ class ASAP7PhysicalFlowTool(Tool):
                 issues=["Invalid input: module_name"],
             )
 
-        image = os.environ.get("CHIPAGENT_OPENROAD_IMAGE", "chipagent/openroad:latest")
+        image = configured_openroad_image()
         docker = docker_image_status(image)
-        if not docker.get("cli_available") or not docker.get("image_available"):
+        if not docker.get("cli_available") or not docker.get("usable"):
             return missing_tool_result(
                 "openroad",
-                "OpenROAD ORFS image is unavailable. Run: bash scripts/setup_eda_env.sh --docker-openroad",
+                "OpenROAD ORFS image is unavailable or has the wrong architecture. "
+                f"{docker.get('error') or ''} Run: bash scripts/setup_eda_env.sh --docker-openroad",
                 install_url="https://openroad-flow-scripts.readthedocs.io/en/latest/user/DockerShell.html",
             )
 

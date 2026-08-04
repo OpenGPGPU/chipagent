@@ -23,7 +23,8 @@ Notes:
   --apt installs the tools available from common Ubuntu/Debian repositories:
   verilator, iverilog, yosys, magic, netgen-lvs, gcc, g++, make, python3-pip, git.
   --docker-openroad builds an adapter around an image that already contains
-  openroad and sta. Set CHIPAGENT_OPENROAD_BASE_IMAGE to choose that image.
+  openroad and sta on amd64, or the native source image on arm64. The Docker
+  daemon architecture is detected automatically; mismatched overrides fail.
 USAGE
 }
 
@@ -31,6 +32,37 @@ if [[ $# -ne 1 ]]; then
   usage
   exit 2
 fi
+
+docker_arch() {
+  local arch
+  arch="$(docker info --format '{{.Architecture}}' 2>/dev/null || true)"
+  case "$arch" in
+    amd64|x86_64) echo amd64 ;;
+    arm64|aarch64) echo arm64 ;;
+    *) echo "Unsupported or unavailable Docker daemon architecture: ${arch:-unknown}" >&2; return 1 ;;
+  esac
+}
+
+default_openroad_image() {
+  case "$(docker_arch)" in
+    arm64) echo chipagent/openroad:arm64 ;;
+    amd64) echo chipagent/openroad:amd64 ;;
+  esac
+}
+
+verify_image_arch() {
+  local image="$1" expected actual
+  expected="$(docker_arch)"
+  actual="$(docker image inspect --format '{{.Architecture}}' "$image" 2>/dev/null || true)"
+  case "$actual" in
+    x86_64) actual=amd64 ;;
+    aarch64) actual=arm64 ;;
+  esac
+  if [[ "$actual" != "$expected" ]]; then
+    echo "Image '$image' architecture '${actual:-unknown}' does not match Docker daemon '$expected'." >&2
+    return 1
+  fi
+}
 
 prepare_sv2v() {
   local version=v0.0.13
@@ -58,15 +90,28 @@ case "$1" in
       -t chipagent/tools:latest -f Dockerfile .
     ;;
   --docker-openroad)
-    prepare_sv2v
-    build_args=(
-      --pull=false
-      --platform "${CHIPAGENT_OPENROAD_PLATFORM:-linux/amd64}"
-      --build-arg "OPENROAD_BASE_IMAGE=${CHIPAGENT_OPENROAD_BASE_IMAGE:-openroad/orfs:latest}"
-    )
-    docker build "${build_args[@]}" \
-      -t "${CHIPAGENT_OPENROAD_IMAGE:-chipagent/openroad:latest}" \
-      -f Dockerfile.openroad .
+    arch="$(docker_arch)"
+    image="${CHIPAGENT_OPENROAD_IMAGE:-$(default_openroad_image)}"
+    requested_platform="${CHIPAGENT_OPENROAD_PLATFORM:-linux/$arch}"
+    if [[ "$requested_platform" != "linux/$arch" ]]; then
+      echo "Refusing emulated OpenROAD platform '$requested_platform'; Docker daemon is '$arch'." >&2
+      exit 1
+    fi
+    if [[ "$arch" == arm64 ]]; then
+      required=.eda-cache/OpenROAD-flow-scripts-arm64
+      if [[ ! -d "$required" ]]; then
+        echo "Missing native ARM64 ORFS source cache: $required" >&2
+        exit 1
+      fi
+      docker build --pull=false --platform linux/arm64 \
+        -t "$image" -f Dockerfile.openroad.arm64 .
+    else
+      prepare_sv2v
+      docker build --pull=false --platform linux/amd64 \
+        --build-arg "OPENROAD_BASE_IMAGE=${CHIPAGENT_OPENROAD_BASE_IMAGE:-openroad/orfs:latest}" \
+        -t "$image" -f Dockerfile.openroad .
+    fi
+    verify_image_arch "$image"
     ;;
   --apt)
     if ! command -v apt-get >/dev/null 2>&1; then
@@ -93,7 +138,7 @@ case "$1" in
     ;;
   --smoke)
     bash scripts/smoke_eda_env.sh
-    IMAGE="${CHIPAGENT_OPENROAD_IMAGE:-chipagent/openroad:latest}"
+    IMAGE="${CHIPAGENT_OPENROAD_IMAGE:-$(default_openroad_image)}"
     if docker image inspect "$IMAGE" >/dev/null 2>&1; then
       "$0" --smoke-openroad
     else
@@ -101,12 +146,13 @@ case "$1" in
     fi
     ;;
   --smoke-openroad)
-    IMAGE="${CHIPAGENT_OPENROAD_IMAGE:-chipagent/openroad:latest}"
+    IMAGE="${CHIPAGENT_OPENROAD_IMAGE:-$(default_openroad_image)}"
     if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
       echo "OpenROAD image '$IMAGE' not found." >&2
       echo "Set CHIPAGENT_OPENROAD_IMAGE to an image containing openroad and sta." >&2
       exit 1
     fi
+    verify_image_arch "$IMAGE"
     docker run --rm --network none "$IMAGE" sh -eu -c '
       openroad -version
       sta -version
