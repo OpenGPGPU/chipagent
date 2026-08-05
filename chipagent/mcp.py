@@ -1076,6 +1076,7 @@ def chipagent_run_routing(
 @mcp.tool()
 def chipagent_run_physical_flow_asap7(
     reg_code: str,
+    rtl_files: Optional[List[str]] = None,
     module_name: str = "dut",
     clock_port: str = "clk",
     clock_period: float = 310.0,
@@ -1107,7 +1108,8 @@ def chipagent_run_physical_flow_asap7(
     the configured OpenROAD Docker image.
 
     Args:
-        reg_code: RTL code to implement
+        reg_code: RTL code to implement; may be empty when rtl_files is provided
+        rtl_files: Ordered Verilog/SystemVerilog source paths for multi-file designs
         module_name: Top module name
         clock_port: Clock port name used in the generated SDC
         clock_period: ASAP7 SDC clock period, default 310
@@ -1146,6 +1148,7 @@ def chipagent_run_physical_flow_asap7(
         task=TaskObject(task_type="physical_flow_asap7", module_name=module_name, description=""),
         inputs={
             "reg_code": reg_code or "",
+            "rtl_files": rtl_files,
             "module_name": module_name,
             "clock_port": clock_port,
             "clock_period": clock_period,

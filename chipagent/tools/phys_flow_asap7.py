@@ -14,11 +14,36 @@ from chipagent.toolchain import configured_openroad_image, docker_image_status
 from chipagent.tools.base import Tool, ToolContext, ToolResult, missing_tool_result, trust_metadata
 
 
+def _rtl_source(reg_code: str, rtl_files: Any) -> str:
+    """Combine explicit RTL text and ordered Verilog/SystemVerilog files."""
+    chunks = [str(reg_code).strip()] if str(reg_code).strip() else []
+    if rtl_files is None:
+        return "\n".join(chunks)
+    paths = [rtl_files] if isinstance(rtl_files, (str, Path)) else list(rtl_files)
+    for raw_path in paths:
+        path = Path(raw_path).expanduser().resolve()
+        if path.suffix.lower() not in {".v", ".sv"}:
+            raise ValueError(f"RTL file must end in .v or .sv: {path}")
+        if not path.is_file():
+            raise ValueError(f"RTL file does not exist: {path}")
+        chunks.append(f"// ChipAgent source: {path.name}\n{path.read_text()}")
+    return "\n".join(chunks).strip()
+
+
 class ASAP7PhysicalFlowTool(Tool):
     name = "run_physical_flow_asap7"
 
     def run(self, ctx: ToolContext) -> ToolResult:
-        reg_code = (ctx.inputs.get("reg_code") or ctx.inputs.get("netlist") or "").strip()
+        try:
+            reg_code = _rtl_source(
+                ctx.inputs.get("reg_code") or ctx.inputs.get("netlist") or "",
+                ctx.inputs.get("rtl_files"),
+            )
+        except ValueError as exc:
+            return ToolResult(
+                result={"status": "error", "message": str(exc)},
+                issues=["Invalid RTL input"],
+            )
         module_name = ctx.task.module_name or ctx.inputs.get("module_name") or "top"
         if not reg_code:
             return ToolResult(

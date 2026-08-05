@@ -6,7 +6,31 @@ from chipagent.tools.phys_flow_asap7 import (
     _config,
     _next_numbered_output,
     _sdc,
+    _rtl_source,
 )
+
+
+def test_rtl_source_combines_ordered_multifile_design(tmp_path):
+    child = tmp_path / "child.sv"
+    top = tmp_path / "top.sv"
+    child.write_text("module child; endmodule\n")
+    top.write_text("module top; child u(); endmodule\n")
+
+    source = _rtl_source("", [str(child), str(top)])
+
+    assert source.index("module child") < source.index("module top")
+    assert "ChipAgent source: child.sv" in source
+
+
+def test_rtl_source_rejects_non_rtl_file(tmp_path):
+    source = tmp_path / "sources.f"
+    source.write_text("top.sv\n")
+
+    try:
+        _rtl_source("", [str(source)])
+        assert False, "expected invalid extension"
+    except ValueError as exc:
+        assert ".v or .sv" in str(exc)
 
 
 def test_orfs_config_accepts_verilog_and_systemverilog_sources():
