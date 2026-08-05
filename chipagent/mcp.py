@@ -293,6 +293,8 @@ def chipagent_run_simulation(
     tb_code: str,
     module_name: str = "dut",
     output_dir: Optional[str] = None,
+    waveform_protocols: Optional[List[Dict[str, Any]]] = None,
+    failure_time: Optional[int] = None,
 ) -> str:
     """Compile + run an RTL + testbench pair (iverilog/verilator when present)
     and report pass/fail + the VCD path."""
@@ -303,9 +305,40 @@ def chipagent_run_simulation(
     res = tool.run(ToolContext(
         task=TaskObject(task_type="hw_sw_codesign", module_name=module_name, description="",
                         constraints={"data_width": 32}),
-        inputs={"reg_code": reg_code, "tb_code": tb_code, "output_dir": output_dir},
+        inputs={"reg_code": reg_code, "tb_code": tb_code, "output_dir": output_dir,
+                "waveform_protocols": waveform_protocols,
+                "failure_time": failure_time},
     ))
     return _tool_result_text(res, "run_simulation")
+
+
+@mcp.tool()
+def chipagent_analyze_waveform(
+    waveform_path: str,
+    protocols: List[Dict[str, Any]],
+    module_name: str = "dut",
+    failure_time: Optional[int] = None,
+    window_before: int = 100,
+    window_after: int = 20,
+    output_dir: Optional[str] = None,
+) -> str:
+    """Analyze VCD/FST data and return evidence-backed ready/valid transaction
+    timelines, stall timeouts, unknown values, and stalled-payload violations.
+
+    Each protocol names ``valid`` and ``ready`` signals and may include
+    ``clock``, ``id``, ``payload`` and ``max_stall_time``.
+    """
+    from .models import TaskObject
+    from .tools import ToolContext
+    from .tools.waveform_analysis import AnalyzeWaveformTool
+    res = AnalyzeWaveformTool().run(ToolContext(
+        task=TaskObject(task_type="waveform_debug", module_name=module_name,
+                        description="analyze waveform data"),
+        inputs={"waveform_path": waveform_path, "protocols": protocols,
+                "failure_time": failure_time, "window_before": window_before,
+                "window_after": window_after, "output_dir": output_dir},
+    ))
+    return _tool_result_text(res, "analyze_waveform")
 
 
 @mcp.tool()
@@ -526,6 +559,7 @@ def chipagent_list_tools() -> str:
 def _tool_description(name: str, fallback: str = "") -> str:
     descriptions = {
         "run_simulation": "Compile and run RTL plus testbench with Icarus Verilog or Verilator.",
+        "analyze_waveform": "Analyze VCD/FST protocol activity and emit structured failure evidence.",
         "run_synthesis": "Run Yosys synthesis and persist netlist/report artifacts.",
         "analyze_timing": "Analyze timing with OpenSTA when Liberty is supplied, otherwise return a Yosys structural estimate.",
         "optimize_area": "Run Yosys area-oriented optimization and report before/after structure.",
@@ -548,7 +582,7 @@ def _tool_category(name: str) -> str:
         return "physical_design"
     if name in {"run_synthesis", "analyze_timing", "optimize_area", "analyze_power", "run_formality"}:
         return "synthesis"
-    if name in {"run_simulation", "elaborate_check", "analyze_coverage", "run_dpi_cosim"}:
+    if name in {"run_simulation", "analyze_waveform", "elaborate_check", "analyze_coverage", "run_dpi_cosim"}:
         return "verification"
     if "interface" in name or "alignment" in name or "cosim" in name:
         return "hw_sw"
@@ -1055,6 +1089,8 @@ def chipagent_run_physical_flow_asap7(
     clean: bool = False,
     macro_lefs: Optional[List[str]] = None,
     macro_libs: Optional[List[str]] = None,
+    macro_gds: Optional[List[str]] = None,
+    macro_placement_tcl: Optional[str] = None,
     timing_effort: str = "explore",
     synthesis_engine: str = "syn",
     sv_frontend: str = "native",
@@ -1087,6 +1123,8 @@ def chipagent_run_physical_flow_asap7(
         clean: Remove previous ORFS work tree before running
         macro_lefs: Macro abstract physical views to add to ORFS
         macro_libs: Matching macro Liberty timing/power views
+        macro_gds: Matching macro GDS views for final layout merge
+        macro_placement_tcl: Optional fixed macro-placement Tcl script
         timing_effort: ORFS optimization profile: explore, closure, or closure_no_cts
         synthesis_engine: ORFS synthesis engine: syn or yosys
         sv_frontend: SystemVerilog frontend: native or sv2v
@@ -1121,6 +1159,8 @@ def chipagent_run_physical_flow_asap7(
             "clean": clean,
             "macro_lefs": macro_lefs,
             "macro_libs": macro_libs,
+            "macro_gds": macro_gds,
+            "macro_placement_tcl": macro_placement_tcl,
             "timing_effort": timing_effort,
             "synthesis_engine": synthesis_engine,
             "sv_frontend": sv_frontend,

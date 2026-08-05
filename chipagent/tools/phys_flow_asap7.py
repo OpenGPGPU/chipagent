@@ -127,6 +127,10 @@ class ASAP7PhysicalFlowTool(Tool):
         try:
             macro_lefs = _macro_files(ctx.inputs.get("macro_lefs"), ".lef")
             macro_libs = _macro_files(ctx.inputs.get("macro_libs"), ".lib")
+            macro_gds = _macro_files(ctx.inputs.get("macro_gds"), ".gds")
+            placement_files = _macro_files(
+                ctx.inputs.get("macro_placement_tcl"), ".tcl"
+            )
         except ValueError as exc:
             return ToolResult(
                 result={"status": "error", "message": str(exc)},
@@ -139,6 +143,12 @@ class ASAP7PhysicalFlowTool(Tool):
                     "message": "macro_lefs and macro_libs must both be provided",
                 },
                 issues=["Incomplete macro collateral"],
+            )
+        macro_placement_tcl = placement_files[0] if placement_files else None
+        if len(placement_files) > 1:
+            return ToolResult(
+                result={"status": "error", "message": "only one macro placement Tcl is supported"},
+                issues=["Invalid macro placement"],
             )
         manifest = _manifest(
             reg_code=reg_code,
@@ -161,6 +171,8 @@ class ASAP7PhysicalFlowTool(Tool):
             abc_clock_period_ps=abc_clock_period_ps,
             macro_lefs=macro_lefs,
             macro_libs=macro_libs,
+            macro_gds=macro_gds,
+            macro_placement_tcl=macro_placement_tcl,
         )
         manifest_path = out / "flow_manifest.json"
         cache_enabled = bool(ctx.inputs.get("cache", True))
@@ -178,8 +190,10 @@ class ASAP7PhysicalFlowTool(Tool):
         macro_dir = design_cfg / "macros"
         if macro_lefs:
             macro_dir.mkdir(parents=True, exist_ok=True)
-            for macro_file in [*macro_lefs, *macro_libs]:
+            for macro_file in [*macro_lefs, *macro_libs, *macro_gds]:
                 shutil.copy2(macro_file, macro_dir / macro_file.name)
+        if macro_placement_tcl:
+            shutil.copy2(macro_placement_tcl, design_cfg / "macro_placement.tcl")
         for subdir in ("logs", "reports", "results", "objects"):
             (work / subdir).mkdir(parents=True, exist_ok=True)
 
@@ -203,6 +217,8 @@ class ASAP7PhysicalFlowTool(Tool):
                 corner,
                 cell_vt=cell_vt,
                 has_macros=bool(macro_lefs),
+                has_macro_gds=bool(macro_gds),
+                has_macro_placement=bool(macro_placement_tcl),
                 timing_effort=timing_effort,
                 synthesis_engine=synthesis_engine,
                 sv_frontend=sv_frontend,
@@ -349,6 +365,8 @@ def _config(
     corner: str = "WC",
     cell_vt: str = "RVT",
     has_macros: bool = False,
+    has_macro_gds: bool = False,
+    has_macro_placement: bool = False,
     timing_effort: str = "explore",
     synthesis_engine: str = "syn",
     sv_frontend: str = "native",
@@ -359,10 +377,11 @@ def _config(
 ) -> str:
     macro_config = ""
     if has_macros:
-        macro_config = """
+        macro_config = f"""
 export ADDITIONAL_LEFS = $(sort $(wildcard $(DESIGN_HOME)/$(PLATFORM)/$(DESIGN_NAME)/macros/*.lef))
 export ADDITIONAL_LIBS = $(sort $(wildcard $(DESIGN_HOME)/$(PLATFORM)/$(DESIGN_NAME)/macros/*.lib))
-export GDS_ALLOW_EMPTY = fakeram.*
+{('export ADDITIONAL_GDS = $(sort $(wildcard $(DESIGN_HOME)/$(PLATFORM)/$(DESIGN_NAME)/macros/*.gds))' if has_macro_gds else 'export GDS_ALLOW_EMPTY = fakeram.* srambank_.*')}
+{('export MACRO_PLACEMENT_TCL = $(DESIGN_HOME)/$(PLATFORM)/$(DESIGN_NAME)/macro_placement.tcl' if has_macro_placement else '')}
 """
     if timing_effort in {"closure", "closure_no_cts"}:
         skip_cts_repair = 1 if timing_effort == "closure_no_cts" else 0
@@ -480,8 +499,12 @@ def _manifest(
     abc_clock_period_ps: float | None = None,
     macro_lefs: List[Path] | None = None,
     macro_libs: List[Path] | None = None,
+    macro_gds: List[Path] | None = None,
+    macro_placement_tcl: Path | None = None,
 ) -> Dict[str, Any]:
-    macro_files = [*(macro_lefs or []), *(macro_libs or [])]
+    macro_files = [*(macro_lefs or []), *(macro_libs or []), *(macro_gds or [])]
+    if macro_placement_tcl:
+        macro_files.append(macro_placement_tcl)
     macro_hashes = {
         path.name: hashlib.sha256(path.read_bytes()).hexdigest()
         for path in macro_files

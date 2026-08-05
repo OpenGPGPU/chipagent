@@ -29,6 +29,22 @@ def test_orfs_config_adds_macro_collateral():
     assert "GDS_ALLOW_EMPTY = fakeram.*" in config
 
 
+def test_orfs_config_adds_macro_gds_and_fixed_placement():
+    config = _config(
+        "SharedL2Slice",
+        15,
+        0.30,
+        "TC",
+        has_macros=True,
+        has_macro_gds=True,
+        has_macro_placement=True,
+    )
+
+    assert "export ADDITIONAL_GDS" in config
+    assert "export MACRO_PLACEMENT_TCL" in config
+    assert "GDS_ALLOW_EMPTY" not in config
+
+
 def test_orfs_closure_config_enables_timing_repairs():
     config = _config(
         "ScalarRegisterManager",
