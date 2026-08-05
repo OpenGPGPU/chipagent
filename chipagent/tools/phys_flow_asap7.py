@@ -1006,7 +1006,7 @@ def _summary_markdown(
 |---|---:|---|
 | Routing DRC errors | {value(physical.get('drc_errors'))} | PASS when 0 |
 | Antenna violating nets | {value(physical.get('antenna_violating_nets'))} | PASS when 0 |
-| Standard-cell area | {value(physical.get('standard_cell_area_um2'), ' um^2')} | Excludes fill cells |
+| Placed instance area | {value(physical.get('standard_cell_area_um2'), ' um^2')} | Includes hard macros; excludes fill cells |
 | Placement utilization | {value(physical.get('placement_utilization_percent'), '%')} | Informational |
 | Total power | {value(physical.get('total_power_mw'), ' mW')} | Corner/activity dependent |
 
