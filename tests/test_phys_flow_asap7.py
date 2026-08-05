@@ -33,6 +33,32 @@ def test_rtl_source_rejects_non_rtl_file(tmp_path):
         assert ".v or .sv" in str(exc)
 
 
+def test_simple_report_distinguishes_global_and_core_slack():
+    from chipagent.tools.phys_flow_asap7 import _summary_markdown
+
+    overview = {
+        "verdict": "FAIL",
+        "headline": "timing failed",
+        "next_action": "inspect paths",
+        "target": {"frequency_mhz": 1000.0, "clock_period_ps": 1000.0,
+                   "corner": "TC"},
+        "timing": {
+            "setup_slack_ps": -1400.0, "hold_slack_ps": -20.0,
+            "setup_tns_ps": -1.0, "hold_tns_ps": -2.0,
+            "core_clock_fmax_mhz": 500.0, "setup_violations": 2,
+            "hold_violations": 3,
+            "critical_path": {"startpoint": "a", "endpoint": "b",
+                              "slack_ps": -900.0},
+        },
+        "physical": {},
+    }
+
+    report = _summary_markdown("dut", overview, {})
+
+    assert "Worst setup slack (all groups)" in report
+    assert "Core critical-path slack | -900.000 ps" in report
+
+
 def test_orfs_config_accepts_verilog_and_systemverilog_sources():
     config = _config("DecodePipe", 30, 0.35, "WC")
 

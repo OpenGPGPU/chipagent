@@ -1005,8 +1005,8 @@ def _summary_markdown(
 
 | Check | Result | Meaning |
 |---|---:|---|
-| Setup slack | {value(timing.get('setup_slack_ps'), ' ps')} | PASS when >= 0 |
-| Hold slack | {value(timing.get('hold_slack_ps'), ' ps')} | PASS when >= 0 |
+| Worst setup slack (all groups) | {value(timing.get('setup_slack_ps'), ' ps')} | Includes virtual I/O paths; PASS when >= 0 |
+| Worst hold slack (all groups) | {value(timing.get('hold_slack_ps'), ' ps')} | Includes virtual I/O paths; PASS when >= 0 |
 | Setup TNS | {value(timing.get('setup_tns_ps'), ' ps')} | PASS when 0 |
 | Hold TNS | {value(timing.get('hold_tns_ps'), ' ps')} | PASS when 0 |
 | Core-clock Fmax | {value(timing.get('core_clock_fmax_mhz'), ' MHz')} | Tool-reported estimate |
@@ -1019,6 +1019,7 @@ def _summary_markdown(
 |---|---:|
 | Startpoint | {value(critical.get('startpoint'))} |
 | Endpoint | {value(critical.get('endpoint'))} |
+| Core critical-path slack | {value(critical.get('slack_ps'), ' ps')} |
 | Data-path delay | {value(critical.get('data_path_delay_ps'), ' ps')} |
 | Cell delay | {value(critical.get('cell_delay_ps'), ' ps')} ({value(critical.get('cell_delay_percent'), '%')}) |
 | Net delay | {value(critical.get('net_delay_ps'), ' ps')} ({value(critical.get('net_delay_percent'), '%')}) |
