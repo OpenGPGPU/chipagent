@@ -45,13 +45,37 @@ class RunSimulationTool(Tool):
         verilator = _which("verilator")
 
         if iverilog and vvp:
-            return self._run_iverilog(iverilog, vvp, reg_path, tb_path, work, ctx)
+            result = self._run_iverilog(iverilog, vvp, reg_path, tb_path, work, ctx)
+            return self._attach_waveform_analysis(result, ctx)
         if verilator:
-            return self._run_verilator(verilator, reg_path, tb_path, work, ctx)
+            result = self._run_verilator(verilator, reg_path, tb_path, work, ctx)
+            return self._attach_waveform_analysis(result, ctx)
         return ToolResult(
             result={"status": "skipped", "passed": "skipped", "reason": "no iverilog/verilator on PATH"},
             issues=[],
         )
+
+    def _attach_waveform_analysis(self, result: ToolResult, ctx: ToolContext) -> ToolResult:
+        protocols = ctx.inputs.get("waveform_protocols") or ctx.inputs.get("protocols")
+        vcd_path = result.result.get("vcd_path")
+        if not protocols or not vcd_path:
+            return result
+        from .waveform_analysis import AnalyzeWaveformTool
+        wave_inputs = {
+            "waveform_path": vcd_path,
+            "protocols": protocols,
+            "failure_time": ctx.inputs.get("failure_time"),
+            "window_before": ctx.inputs.get("window_before", 100),
+            "window_after": ctx.inputs.get("window_after", 20),
+            "output_dir": ctx.inputs.get("output_dir"),
+        }
+        wave = AnalyzeWaveformTool().run(ToolContext(
+            task=ctx.task, inputs=wave_inputs, settings=ctx.settings,
+            work_dir=ctx.work_dir,
+        ))
+        result.result["waveform_analysis"] = wave.normalized(
+            tool_name="analyze_waveform")
+        return result
 
     # ------------------------------------------------------------------
     def _run_iverilog(

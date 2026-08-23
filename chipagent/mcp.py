@@ -1098,8 +1098,13 @@ def chipagent_run_physical_flow_asap7(
     enable_retiming: bool = False,
     swap_arithmetic_operators: bool = False,
     max_fanout: Optional[int] = None,
+    high_fanout_nets: Optional[List[str]] = None,
+    high_fanout_max: int = 8,
     setup_slack_margin: float = 0.0,
     abc_clock_period_ps: Optional[float] = None,
+    io_delay_percent: float = 0.2,
+    io_false_path_ports: Optional[List[str]] = None,
+    post_floorplan_tcl: Optional[str] = None,
 ) -> str:
     """Run the ASAP7 OpenROAD Flow Scripts physical implementation flow.
 
@@ -1134,6 +1139,9 @@ def chipagent_run_physical_flow_asap7(
         swap_arithmetic_operators: Generate multiple adder/multiplier architectures
             and let OpenROAD select implementations using physical timing
         max_fanout: Optional SDC maximum fanout constraint
+        high_fanout_nets: Hierarchical net patterns whose fanout should be
+            repaired without globally over-buffering the design
+        high_fanout_max: Maximum fanout applied to the named high-fanout nets
         setup_slack_margin: ORFS setup repair margin in nanoseconds
         abc_clock_period_ps: Optional tighter delay target passed to Yosys/ABC
 
@@ -1170,11 +1178,182 @@ def chipagent_run_physical_flow_asap7(
             "enable_retiming": enable_retiming,
             "swap_arithmetic_operators": swap_arithmetic_operators,
             "max_fanout": max_fanout,
+            "high_fanout_nets": high_fanout_nets,
+            "high_fanout_max": high_fanout_max,
             "setup_slack_margin": setup_slack_margin,
             "abc_clock_period_ps": abc_clock_period_ps,
+            "io_delay_percent": io_delay_percent,
+            "io_false_path_ports": io_false_path_ports,
+            "post_floorplan_tcl": post_floorplan_tcl,
         },
     ))
     return _tool_result_text(res, "run_physical_flow_asap7")
+
+
+@mcp.tool()
+def chipagent_run_physical_flow(
+    reg_code: str,
+    rtl_files: Optional[List[str]] = None,
+    module_name: str = "dut",
+    platform: str = "asap7",
+    clock_port: str = "clk",
+    clock_period: float = 310.0,
+    core_utilization: int = 10,
+    place_density: float = 0.20,
+    output_dir: Optional[str] = None,
+    timeout: int = 1800,
+    cache: bool = True,
+    clean: bool = False,
+    timing_effort: str = "explore",
+    synthesis_engine: str = "syn",
+    sv_frontend: str = "native",
+    enable_retiming: bool = False,
+    swap_arithmetic_operators: bool = False,
+    max_fanout: Optional[int] = None,
+    high_fanout_nets: Optional[List[str]] = None,
+    high_fanout_max: int = 8,
+    setup_slack_margin: float = 0.0,
+    abc_clock_period_ps: Optional[float] = None,
+    platform_options: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Run a physical implementation flow without naming a process in the API.
+
+    The platform is an explicit argument instead of being baked into the tool
+    name.  Today only ``asap7`` is wired to an OpenROAD/ORFS backend; other
+    platforms return an honest ``unavailable`` result.  Technology-specific
+    settings such as ``corner``, ``cell_vt``, and macro collateral belong in
+    ``platform_options``.
+
+    Args:
+        reg_code: RTL code to implement; may be empty when rtl_files is provided
+        rtl_files: Ordered Verilog/SystemVerilog source paths for multi-file designs
+        module_name: Top module name
+        platform: Physical-design platform, currently ``asap7``
+        clock_port: Clock port name used in the generated SDC
+        clock_period: SDC clock period
+        core_utilization: Core utilization percentage
+        place_density: Placement density
+        output_dir: Directory for flow work tree, logs, reports, and results
+        timeout: Flow timeout in seconds
+        cache: Reuse an existing matching physical result when possible
+        clean: Remove previous flow work tree before running
+        timing_effort: Optimization profile supported by the backend
+        synthesis_engine: Synthesis engine supported by the backend
+        sv_frontend: SystemVerilog frontend supported by the backend
+        enable_retiming: Apply sequential retiming
+        swap_arithmetic_operators: Generate multiple arithmetic architectures
+        max_fanout: Optional global maximum fanout constraint
+        high_fanout_nets: Hierarchical net patterns for targeted fanout repair
+        high_fanout_max: Maximum fanout for the named high-fanout nets
+        setup_slack_margin: Setup repair margin
+        abc_clock_period_ps: Optional tighter synthesis delay target
+        platform_options: Backend-specific options (e.g. ASAP7 corner,
+            cell_vt, macro LEF/lib/GDS, and macro placement Tcl)
+
+    Returns:
+        Physical flow status with collected DEF/GDS/report artifacts
+    """
+    if platform.lower() != "asap7":
+        return _to_text({
+            "status": "unavailable",
+            "platform": platform,
+            "tool_available": False,
+            "message": (
+                f"platform '{platform}' is not wired to a physical-design "
+                "backend yet; supported platforms: asap7"
+            ),
+        })
+    opts = dict(platform_options or {})
+    return chipagent_run_physical_flow_asap7(
+        reg_code=reg_code,
+        rtl_files=rtl_files,
+        module_name=module_name,
+        clock_port=clock_port,
+        clock_period=clock_period,
+        core_utilization=core_utilization,
+        place_density=place_density,
+        corner=opts.get("corner", "WC"),
+        cell_vt=opts.get("cell_vt", "RVT"),
+        output_dir=output_dir,
+        timeout=timeout,
+        cache=cache,
+        clean=clean,
+        macro_lefs=opts.get("macro_lefs"),
+        macro_libs=opts.get("macro_libs"),
+        macro_gds=opts.get("macro_gds"),
+        macro_placement_tcl=opts.get("macro_placement_tcl"),
+        timing_effort=timing_effort,
+        synthesis_engine=synthesis_engine,
+        sv_frontend=sv_frontend,
+        enable_retiming=enable_retiming,
+        swap_arithmetic_operators=swap_arithmetic_operators,
+        max_fanout=max_fanout,
+        high_fanout_nets=high_fanout_nets,
+        high_fanout_max=high_fanout_max,
+        setup_slack_margin=setup_slack_margin,
+        abc_clock_period_ps=abc_clock_period_ps,
+        io_delay_percent=opts.get("io_delay_percent", 0.2),
+    )
+
+
+@mcp.tool()
+def chipagent_run_synthesis_asap7(
+    reg_code: str,
+    rtl_files: Optional[List[str]] = None,
+    module_name: str = "dut",
+    clock_port: str = "clk",
+    clock_period: float = 1000.0,
+    corner: str = "TC",
+    cell_vt: str = "SLVT",
+    output_dir: Optional[str] = None,
+    timeout: int = 3600,
+    cache: bool = True,
+    clean: bool = False,
+    macro_lefs: Optional[List[str]] = None,
+    macro_libs: Optional[List[str]] = None,
+    synthesis_engine: str = "yosys",
+    sv_frontend: str = "native",
+    enable_retiming: bool = True,
+    abc_clock_period_ps: Optional[float] = None,
+) -> str:
+    """Run ORFS ASAP7 synthesis only and report pre-layout setup Fmax.
+
+    This is the fast 1 GHz gate: it performs Yosys/ABC synthesis against the
+    selected ASAP7 corner/VT library and then runs STA on the synthesized ODB.
+    No floorplan, placement, CTS, or routing is executed.
+    """
+    from .tools.base import ToolContext
+    from .tools.phys_flow_asap7 import ASAP7PhysicalFlowTool
+    from .models import TaskObject
+
+    res = ASAP7PhysicalFlowTool().run(ToolContext(
+        task=TaskObject(
+            task_type="physical_flow_asap7",
+            module_name=module_name,
+            description="",
+        ),
+        inputs={
+            "reg_code": reg_code or "",
+            "rtl_files": rtl_files,
+            "module_name": module_name,
+            "clock_port": clock_port,
+            "clock_period": clock_period,
+            "corner": corner,
+            "cell_vt": cell_vt,
+            "output_dir": output_dir,
+            "timeout": timeout,
+            "cache": cache,
+            "clean": clean,
+            "macro_lefs": macro_lefs,
+            "macro_libs": macro_libs,
+            "synthesis_engine": synthesis_engine,
+            "sv_frontend": sv_frontend,
+            "enable_retiming": enable_retiming,
+            "abc_clock_period_ps": abc_clock_period_ps,
+            "synthesis_only": True,
+        },
+    ))
+    return _tool_result_text(res, "run_synthesis_asap7")
 
 
 @mcp.tool()
@@ -1617,6 +1796,10 @@ def chipagent_run_flow(
     physical_timeout: int = 1800,
     physical_cache: bool = True,
     physical_clean: bool = False,
+    physical_high_fanout_nets: Optional[List[str]] = None,
+    physical_high_fanout_max: int = 8,
+    physical_platform: str = "asap7",
+    physical_platform_options: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Run a reproducible RTL-to-checks EDA flow over supplied design artifacts.
 
@@ -1632,12 +1815,17 @@ def chipagent_run_flow(
         lvs_schematic_netlist: Optional schematic SPICE netlist for LVS
         output_dir: Output directory; defaults to generated/flows/<module_name>
         run_formality: Compare original RTL against synthesized netlist when synthesis succeeds
-        run_physical: Run ASAP7 OpenROAD Flow Scripts physical implementation
-        physical_clock_port: Clock port used for generated ASAP7 SDC
-        physical_clock_period: ASAP7 SDC clock period, default 310
+        run_physical: Run a physical implementation flow
+        physical_clock_port: Clock port used in the generated SDC
+        physical_clock_period: SDC clock period, default 310
         physical_timeout: Physical flow timeout in seconds
-        physical_cache: Reuse matching ASAP7 physical results when present
-        physical_clean: Remove previous ASAP7 work tree before running physical flow
+        physical_cache: Reuse matching physical results when present
+        physical_clean: Remove previous flow work tree before running physical flow
+        physical_high_fanout_nets: Hierarchical net patterns to split with
+            targeted buffers during physical implementation
+        physical_high_fanout_max: Maximum fanout for those targeted nets
+        physical_platform: Physical-design platform (default asap7)
+        physical_platform_options: Backend-specific physical options
 
     Returns:
         Flow report with per-step results, trust metadata, and artifact paths
@@ -1703,21 +1891,26 @@ def chipagent_run_flow(
         }
 
     if run_physical:
-        record("physical", chipagent_run_physical_flow_asap7(
+        record("physical", chipagent_run_physical_flow(
             reg_code=reg_code,
+            rtl_files=None,
             module_name=module_name,
+            platform=physical_platform,
             clock_port=physical_clock_port,
             clock_period=physical_clock_period,
-            output_dir=str(out / "physical_asap7"),
+            output_dir=str(out / "physical"),
             timeout=physical_timeout,
             cache=physical_cache,
             clean=physical_clean,
+            high_fanout_nets=physical_high_fanout_nets,
+            high_fanout_max=physical_high_fanout_max,
+            platform_options=physical_platform_options,
         ))
     else:
         steps["physical"] = {
             "status": "skipped",
             "reason": "run_physical is false",
-            "platform": "asap7",
+            "platform": physical_platform,
         }
 
     if layout:

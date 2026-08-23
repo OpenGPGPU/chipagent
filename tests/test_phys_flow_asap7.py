@@ -4,8 +4,11 @@ from chipagent.tools.phys_flow_asap7 import (
     _build_overview,
     _collect_qor,
     _config,
+    _high_fanout_buffer_cell,
+    _manifest,
     _next_numbered_output,
     _sdc,
+    _targeted_fanout_tcl,
     _rtl_source,
 )
 
@@ -93,6 +96,21 @@ def test_orfs_config_adds_macro_gds_and_fixed_placement():
     assert "export ADDITIONAL_GDS" in config
     assert "export MACRO_PLACEMENT_TCL" in config
     assert "GDS_ALLOW_EMPTY" not in config
+
+
+def test_orfs_config_can_hook_targeted_fanout_repair():
+    config = _config(
+        "SharedL2Slice",
+        15,
+        0.30,
+        "TC",
+        has_high_fanout_repair=True,
+    )
+
+    assert (
+        "export POST_RESIZE_TCL = $(DESIGN_HOME)/$(PLATFORM)/$(DESIGN_NAME)/targeted_fanout.tcl"
+        in config
+    )
 
 
 def test_orfs_closure_config_enables_timing_repairs():
@@ -201,6 +219,46 @@ def test_orfs_sdc_can_constrain_max_fanout():
     sdc = _sdc("ScalarRegisterManager", "clock", 1000.0, max_fanout=10)
 
     assert "set_max_fanout 10 [current_design]" in sdc
+
+
+def test_targeted_fanout_tcl_splits_named_nets():
+    tcl = _targeted_fanout_tcl(
+        ["storeTable.pendingEntry"],
+        high_fanout_max=6,
+    )
+
+    assert "get_nets -hier $pattern" in tcl
+    assert "insert_buffer -net $net -load_pins $group" in tcl
+    assert "chipagent_split_high_fanout_net {storeTable.pendingEntry} 6" in tcl
+
+
+def test_targeted_fanout_helper_is_empty_without_targets():
+    assert _targeted_fanout_tcl([], 8) == ""
+
+
+def test_targeted_fanout_buffer_follows_cell_vt():
+    assert _high_fanout_buffer_cell("RVT") == "BUFx16f_ASAP7_75t_R"
+    assert _high_fanout_buffer_cell("LVT") == "BUFx16f_ASAP7_75t_L"
+    assert _high_fanout_buffer_cell("SLVT") == "BUFx16f_ASAP7_75t_SL"
+
+
+def test_manifest_records_high_fanout_scope(tmp_path):
+    manifest = _manifest(
+        reg_code="module SharedL2Slice; endmodule",
+        module_name="SharedL2Slice",
+        image="chipagent/openroad:arm64",
+        clock_port="clock",
+        clock_period=1000.0,
+        core_utilization=15,
+        place_density=0.30,
+        high_fanout_nets=["storeTable.pendingEntry"],
+        high_fanout_max=6,
+    )
+
+    assert manifest["parameters"]["high_fanout_nets"] == [
+        "storeTable.pendingEntry"
+    ]
+    assert manifest["parameters"]["high_fanout_max"] == 6
 
 
 def test_diagnose_macro_pin_access_failure():

@@ -108,6 +108,26 @@ def test_asap7_physical_flow_missing_input():
     assert "reg_code" in data["message"] or "netlist" in data["message"]
 
 
+def test_generic_physical_flow_rejects_unknown_platform():
+    from chipagent.mcp import chipagent_run_physical_flow
+
+    data = json.loads(chipagent_run_physical_flow(
+        reg_code="", platform="sky130"))
+
+    assert data["status"] == "unavailable"
+    assert "asap7" in data["message"]
+
+
+def test_generic_physical_flow_dispatches_asap7():
+    from chipagent.mcp import chipagent_run_physical_flow
+
+    data = json.loads(chipagent_run_physical_flow(
+        reg_code="", module_name="tiny", platform="asap7"))
+
+    assert data["status"] == "error"
+    assert "reg_code" in data["message"] or "netlist" in data["message"]
+
+
 def test_asap7_physical_flow_diagnoses_clock_port():
     from chipagent.tools.phys_flow_asap7 import _diagnose
 

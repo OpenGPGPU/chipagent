@@ -4,7 +4,7 @@ This file provides guidance to Claude Code when working with this repository.
 
 ## What is ChipAgent
 
-ChipAgent is a **chip design EDA tool MCP service layer** with **52 MCP tools** — it lets Claude Code
+ChipAgent is a **chip design EDA tool MCP service layer** with **53 MCP tools** — it lets Claude Code
 call real chip design tools (Yosys, OpenROAD, Verilator, etc.) via MCP protocol for automated
 verification of chip design flows.
 
@@ -28,7 +28,7 @@ pip install -e .                    # install
 pytest                              # run all tests (183 passed / 3 skipped)
 pytest tests/test_phase3.py -v      # Phase 3 tests (27 tests)
 pytest tests/test_chat_mcp.py       # MCP tool + intent routing tests
-python -m chipagent.mcp --list      # print MCP tool catalogue (52 tools)
+python -m chipagent.mcp --list      # print MCP tool catalogue (53 tools)
 python -m chipagent.mcp             # start MCP server (stdio)
 python -m chipagent.toolchain --pretty  # inspect EDA tool availability
 bash scripts/setup_eda_env.sh --docker  # build/configure the default Docker toolchain images
@@ -49,7 +49,7 @@ Base tools use `chipagent/tools:latest`; OpenROAD/OpenSTA use
 
 ```
 chipagent/
-  mcp.py                # MCP server entry point (FastMCP, stdio transport, 52 tools)
+  mcp.py                # MCP server entry point (FastMCP, stdio transport, 53 tools)
   workflow.py           # LangGraph orchestrator + CLI entry (run_workflow)
   multistep.py          # Multi-step workflow: reg→rtl→tb→sim→driver→align (deprecated, use Claude)
   parser.py             # NL → TaskObject parser (rules + LLM hybrid)

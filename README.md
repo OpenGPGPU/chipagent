@@ -19,7 +19,7 @@ ChipAgent 是一个 **EDA 工具的 MCP 封装**，让 LLM（如 Claude Code）�
 |---|---|
 | **设计空间探索（DSE）** | 对候选变体做 PPA/SW-cost 评估、排序和 tradeoff 汇总；不作为复杂设计生成大脑 |
 | **综合与物理设计** | Yosys 综合、ASAP7 OpenROAD Flow Scripts 到 DEF/GDS；单阶段 floorplan/place/CTS/route 工具在提供 PDK 输入时可用 |
-| **验证仿真** | 编译跑 testbench（iverilog/verilator），报 pass/fail + VCD 路径 |
+| **验证仿真与波形分析** | 编译跑 testbench；流式分析 VCD/FST，输出 ready/valid 事务、ID 配对、stall 与协议违规证据 |
 | **对齐检查** | RTL 寄存器偏移 vs C 头文件一致性、驱动接口契约 vs RTL |
 | **PPA 分析** | 早期静态估算和目标检查；结果必须标记为 estimate，不能替代真实综合/时序/功耗工具 |
 | **SystemVerilog 参数 DSE** | 对已有参数化 RTL 做参数网格探索，复用仿真/综合/可选 ASAP7 physical，并按 QoR 排序 |
@@ -44,6 +44,7 @@ Claude (LLM):
 ChipAgent (MCP Server):
   ├─ chipagent_elaborate()      → Verilator lint / Yosys 草估
   ├─ chipagent_run_simulation() → Icarus Verilog / Verilator 仿真
+  ├─ chipagent_analyze_waveform() → VCD/FST 事务时间线与故障证据
   ├─ chipagent_run_synthesis()  → Yosys 综合
   ├─ chipagent_analyze_timing() → OpenSTA 时序分析
   ├─ chipagent_run_flow(run_physical=True) → RTL 到 ASAP7 DEF/GDS
@@ -51,6 +52,30 @@ ChipAgent (MCP Server):
   ↓ 返回真实结果
 Claude: 分析结果，继续优化...
 ```
+
+波形分析不提供 GUI，也不会猜测 RTL 意图。调用方显式描述协议，例如：
+
+```python
+from chipagent.mcp import chipagent_analyze_waveform
+
+chipagent_analyze_waveform("sim.vcd", [{
+    "name": "l2_request",
+    "clock": "tb.clock",
+    "valid": "tb.dut.io_request_valid",
+    "ready": "tb.dut.io_request_ready",
+    "id": "tb.dut.io_request_bits_transactionId",
+    "payload": ["tb.dut.io_request_bits_address"],
+    "role": "request",
+    "pair": "l2",
+    "max_stall_time": 20,
+    "max_response_time": 200,
+    "source": {"file": "SharedL2Cache.scala", "line": 250}
+}], output_dir="reports")
+```
+
+结果包含 `failure.json` 和 `timeline.md`，可检测 stalled payload 变化、
+stall timeout、重复在途 ID、无请求响应、丢失响应和响应超时。FST 输入需要
+系统中存在 `fst2vcd`；否则工具会明确返回 unavailable/error，不伪造分析。
 
 **关键**: Claude 生成代码，ChipAgent 验证代码。各司其职。
 
@@ -128,6 +153,18 @@ Flow 报告保留兼容的二值 `status`，并提供更具体的 `outcome`：
 
 ASAP7 physical flow 默认启用缓存：当 RTL、模块名、clock/placement 参数和 OpenROAD 镜像一致，且已有 DEF/GDS/log 时会直接复用结果。需要强制重跑时，可调用 `chipagent_run_physical_flow_asap7(..., clean=True)`，或在 `chipagent_run_flow` 中设置 `physical_clean=True`。
 
+对于布局布线后暴露出的单点高扇出网络，ASAP7 flow 支持定点修复而不是全局
+`set_max_fanout` 过缓冲：传入 `high_fanout_nets`（如
+`["storeTable.pendingEntry"]`）和 `high_fanout_max` 后，ChipAgent 会在
+placement repair 阶段用 `insert_buffer` 只拆分指定层次化 net，并自动按
+`cell_vt` 选择 RVT/LVT/SLVT buffer 单元。全局 fanout 约束会造成整个设计
+过度插 buffer，这一参数用于替代它。
+
+推荐入口是工艺无关的 `chipagent_run_physical_flow`：它把 `platform` 作为
+显式参数（当前支持 `asap7`），工艺相关设置放在 `platform_options` 里；
+`chipagent_run_physical_flow_asap7` 保留为 ASAP7 兼容接口，内部仍转发到
+同一个 ORFS 后端。未来接入其他工艺库时不需要再改调用方 API。
+
 ### 方式一：Claude Code 集成（推荐）
 
 仓库根已有 `.mcp.json`，Claude Code 打开项目后**自动发现** ChipAgent MCP Server。
@@ -180,7 +217,7 @@ python -m chipagent.mcp
 └──────────────────────┬──────────────────────────────┘
                        │ MCP (stdio)
 ┌──────────────────────▼──────────────────────────────┐
-│              ChipAgent MCP Server (52 tools)         │
+│              ChipAgent MCP Server (53 tools)         │
 │                  (chipagent.mcp)                     │
 │                                                      │
 │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌────────┐ │
@@ -199,7 +236,7 @@ python -m chipagent.mcp
 └──────────────────────────────────────────────────────┘
 ```
 
-### MCP 工具清单（52 个）
+### MCP 工具清单（53 个）
 
 | 类别 | 工具数 | 工具 |
 |---|---|---|
@@ -208,7 +245,7 @@ python -m chipagent.mcp
 | 综合 | 5 | `chipagent_run_synthesis` · `chipagent_analyze_timing` · `chipagent_optimize_area` · `chipagent_analyze_power` · `chipagent_run_formality` |
 | 物理设计 | 7 | `chipagent_run_physical_flow_asap7` · `chipagent_create_floorplan` · `chipagent_run_placement` · `chipagent_run_cts` · `chipagent_run_routing` · `chipagent_run_drc_check` · `chipagent_run_lvs_check` |
 | 端到端流程 | 2 | `chipagent_run_flow` · `chipagent_run_example_flow` |
-| 验证与量测 | 5 | `chipagent_run_simulation` · `chipagent_elaborate` · `chipagent_check_register_alignment` · `chipagent_check_sw_hw_interface` · `chipagent_analyze_coverage` |
+| 验证与量测 | 6 | `chipagent_run_simulation` · `chipagent_analyze_waveform` · `chipagent_elaborate` · `chipagent_check_register_alignment` · `chipagent_check_sw_hw_interface` · `chipagent_analyze_coverage` |
 | PPA 分析 | 4 | `chipagent_estimate_area` · `chipagent_estimate_performance` · `chipagent_estimate_power` · `chipagent_check_ppa_targets` |
 | 知识库 | 7 | `chipagent_query_knowledge_base` · `chipagent_search_code_examples` · `chipagent_consult_architecture` · `chipagent_diagnose_issue` · `chipagent_generate_documentation` · `chipagent_search_software_reference` · `chipagent_consult_sw_hw_co_design` |
 | 多 Agent 协作 | 2 | `chipagent_coordinate_hw_sw_codesign` · `chipagent_execute_agent_workflow` |

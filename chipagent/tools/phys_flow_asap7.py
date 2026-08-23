@@ -156,6 +156,9 @@ class ASAP7PhysicalFlowTool(Tool):
             placement_files = _macro_files(
                 ctx.inputs.get("macro_placement_tcl"), ".tcl"
             )
+            post_floorplan_files = _macro_files(
+                ctx.inputs.get("post_floorplan_tcl"), ".tcl"
+            )
         except ValueError as exc:
             return ToolResult(
                 result={"status": "error", "message": str(exc)},
@@ -175,6 +178,58 @@ class ASAP7PhysicalFlowTool(Tool):
                 result={"status": "error", "message": "only one macro placement Tcl is supported"},
                 issues=["Invalid macro placement"],
             )
+        post_floorplan_tcl = (
+            post_floorplan_files[0] if post_floorplan_files else None
+        )
+        if len(post_floorplan_files) > 1:
+            return ToolResult(
+                result={
+                    "status": "error",
+                    "message": "only one post-floorplan Tcl is supported",
+                },
+                issues=["Invalid post-floorplan Tcl"],
+            )
+        high_fanout_nets_raw = ctx.inputs.get("high_fanout_nets")
+        high_fanout_nets = None
+        if high_fanout_nets_raw is not None:
+            raw = (
+                [high_fanout_nets_raw]
+                if isinstance(high_fanout_nets_raw, str)
+                else list(high_fanout_nets_raw)
+            )
+            high_fanout_nets = [str(net) for net in raw if str(net).strip()]
+        high_fanout_max_raw = ctx.inputs.get("high_fanout_max")
+        high_fanout_max = (
+            int(high_fanout_max_raw)
+            if high_fanout_max_raw is not None
+            else 8
+        )
+        if high_fanout_max < 2:
+            return ToolResult(
+                result={
+                    "status": "error",
+                    "message": "high_fanout_max must be at least 2",
+                },
+                issues=["Invalid input: high_fanout_max"],
+            )
+        io_delay_percent = float(ctx.inputs.get("io_delay_percent", 0.2))
+        if not 0.0 <= io_delay_percent <= 0.5:
+            return ToolResult(
+                result={
+                    "status": "error",
+                    "message": "io_delay_percent must be between 0.0 and 0.5",
+                },
+                issues=["Invalid input: io_delay_percent"],
+            )
+        io_false_path_ports_raw = ctx.inputs.get("io_false_path_ports")
+        io_false_path_ports = None
+        if io_false_path_ports_raw is not None:
+            raw = (
+                [io_false_path_ports_raw]
+                if isinstance(io_false_path_ports_raw, str)
+                else list(io_false_path_ports_raw)
+            )
+            io_false_path_ports = [str(item) for item in raw if str(item).strip()]
         manifest = _manifest(
             reg_code=reg_code,
             module_name=module_name,
@@ -192,12 +247,18 @@ class ASAP7PhysicalFlowTool(Tool):
             swap_arithmetic_operators=swap_arithmetic_operators,
             generate_gds=generate_gds,
             max_fanout=max_fanout,
+            high_fanout_nets=high_fanout_nets,
+            high_fanout_max=high_fanout_max,
+            high_fanout_buffer_cell=_high_fanout_buffer_cell(cell_vt),
             setup_slack_margin=setup_slack_margin,
             abc_clock_period_ps=abc_clock_period_ps,
+            io_delay_percent=io_delay_percent,
+            io_false_path_ports=io_false_path_ports,
             macro_lefs=macro_lefs,
             macro_libs=macro_libs,
             macro_gds=macro_gds,
             macro_placement_tcl=macro_placement_tcl,
+            post_floorplan_tcl=post_floorplan_tcl,
         )
         manifest_path = out / "flow_manifest.json"
         cache_enabled = bool(ctx.inputs.get("cache", True))
@@ -219,6 +280,8 @@ class ASAP7PhysicalFlowTool(Tool):
                 shutil.copy2(macro_file, macro_dir / macro_file.name)
         if macro_placement_tcl:
             shutil.copy2(macro_placement_tcl, design_cfg / "macro_placement.tcl")
+        if post_floorplan_tcl:
+            shutil.copy2(post_floorplan_tcl, design_cfg / "post_floorplan.tcl")
         for subdir in ("logs", "reports", "results", "objects"):
             (work / subdir).mkdir(parents=True, exist_ok=True)
 
@@ -228,12 +291,29 @@ class ASAP7PhysicalFlowTool(Tool):
         rtl_path = design_src / f"{module_name}.sv"
         sdc_path = design_cfg / "constraint.sdc"
         config_path = design_cfg / "config.mk"
+        targeted_fanout_path = design_cfg / "targeted_fanout.tcl"
         run_log = out / "orfs_run.log"
         rtl_path.write_text(reg_code + "\n", encoding="utf-8")
         sdc_path.write_text(
-            _sdc(module_name, clock_port, clock_period, max_fanout=max_fanout),
+            _sdc(
+                module_name,
+                clock_port,
+                clock_period,
+                max_fanout=max_fanout,
+                io_delay_percent=io_delay_percent,
+                io_false_path_ports=io_false_path_ports,
+            ),
             encoding="utf-8",
         )
+        if high_fanout_nets:
+            targeted_fanout_path.write_text(
+                _targeted_fanout_tcl(
+                    high_fanout_nets,
+                    high_fanout_max,
+                    _high_fanout_buffer_cell(cell_vt),
+                ),
+                encoding="utf-8",
+            )
         config_path.write_text(
             _config(
                 module_name,
@@ -251,6 +331,8 @@ class ASAP7PhysicalFlowTool(Tool):
                 swap_arithmetic_operators=swap_arithmetic_operators,
                 setup_slack_margin=setup_slack_margin,
                 abc_clock_period_ps=abc_clock_period_ps,
+                has_high_fanout_repair=bool(high_fanout_nets),
+                has_post_floorplan_tcl=bool(post_floorplan_tcl),
             ),
             encoding="utf-8",
         )
@@ -290,6 +372,13 @@ class ASAP7PhysicalFlowTool(Tool):
             ),
         ]
 
+        synthesis_only = bool(ctx.inputs.get("synthesis_only", False))
+        if synthesis_only:
+            make_marker = (
+                f"make DESIGN_CONFIG=./designs/asap7/{module_name}/config.mk"
+            )
+            cmd[-1] = cmd[-1].replace(make_marker, make_marker + " synth", 1)
+
         timeout = int(ctx.inputs.get("timeout") or 1800)
         timed_out = False
         try:
@@ -314,6 +403,152 @@ class ASAP7PhysicalFlowTool(Tool):
                 stderr = stderr.decode(errors="replace")
             report = f"{stdout}\n\n[stderr]\n{stderr}\nFlow timed out after {timeout} seconds."
         run_log.write_text(report, encoding="utf-8")
+
+        if synthesis_only:
+            if returncode != 0:
+                return ToolResult(
+                    result={
+                        "status": "failed",
+                        "stage": "1_synth",
+                        "module_name": module_name,
+                        "output_dir": str(out),
+                        "report_tail": "\n".join(report.splitlines()[-80:]),
+                    },
+                    issues=["OpenROAD ORFS ASAP7 synthesis failed"],
+                )
+
+            sta_tcl = out / "synthesis_sta.tcl"
+            sta_tcl.write_text(
+                _synthesis_sta_tcl(
+                    module_name,
+                    cell_vt,
+                    macro_libs=list(macro_libs or []),
+                ),
+                encoding="utf-8",
+            )
+            volumes: List[str] = []
+            index = 0
+            while index < len(cmd):
+                if cmd[index] == "-v":
+                    volumes.extend([cmd[index], cmd[index + 1]])
+                    index += 2
+                else:
+                    index += 1
+            sta_cmd = [
+                "docker",
+                "run",
+                "--rm",
+                *volumes,
+                "-v",
+                f"{sta_tcl}:/tmp/synthesis_sta.tcl",
+                "-w",
+                "/OpenROAD-flow-scripts/flow",
+                image,
+                "openroad",
+                "/tmp/synthesis_sta.tcl",
+            ]
+            try:
+                sta_proc = subprocess.run(
+                    sta_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=600,
+                )
+                sta_report = sta_proc.stdout
+                if sta_proc.stderr:
+                    sta_report = f"{sta_proc.stdout}\n\n[stderr]\n{sta_proc.stderr}"
+            except subprocess.TimeoutExpired as exc:
+                sta_report = "Synthesis STA timed out.\n"
+                if exc.stdout:
+                    sta_report += str(exc.stdout)
+            sta_report_path = out / "synthesis_sta.log"
+            sta_report_path.write_text(sta_report, encoding="utf-8")
+            parsed = _parse_synthesis_sta(sta_report)
+            if parsed.get("status") != "success":
+                return ToolResult(
+                    result={
+                        "status": "failed",
+                        "stage": "1_synth",
+                        "module_name": module_name,
+                        "output_dir": str(out),
+                        "report_tail": "\n".join(sta_report.splitlines()[-80:]),
+                    },
+                    issues=["Could not extract synthesis STA slack"],
+                )
+
+            slack = float(parsed["worst_setup_slack_ps"])
+            fmax_mhz = round(
+                1_000_000.0 / (clock_period - slack), 3
+            ) if slack < clock_period else 1000.0
+            status = "success" if slack >= 0 else "failed"
+            overview = {
+                "verdict": "PASS" if slack >= 0 else "FAIL",
+                "headline": (
+                    "Synthesis meets 1 GHz"
+                    if slack >= 0
+                    else "Synthesis does not meet 1 GHz"
+                ),
+                "next_action": (
+                    "Proceed to physical implementation."
+                    if slack >= 0
+                    else "Pipeline the failing datapath before running physical flow."
+                ),
+                "analysis": "Pre-layout STA on the synthesized netlist",
+                "stage": "1_synth",
+                "target": {
+                    "clock_period_ps": clock_period,
+                    "frequency_mhz": 1000.0,
+                    "corner": corner,
+                },
+                "timing": {
+                    "setup_slack_ps": slack,
+                    "core_clock_fmax_mhz": fmax_mhz,
+                },
+                "physical": {
+                    "note": "synthesis-only gate; no place/route performed",
+                },
+            }
+            artifacts = {
+                "rtl": str(rtl_path),
+                "sdc": str(sdc_path),
+                "config.mk": str(config_path),
+                "run.log": str(run_log),
+                "manifest.json": str(manifest_path),
+                "synthesis_sta.tcl": str(sta_tcl),
+                "synthesis_sta.log": str(sta_report_path),
+            }
+            simple_report = out / "SUMMARY.md"
+            simple_report.write_text(
+                _summary_markdown(module_name, overview, artifacts),
+                encoding="utf-8",
+            )
+            artifacts["simple_report"] = str(simple_report)
+            return ToolResult(
+                result={
+                    "status": status,
+                    "stage": "1_synth",
+                    "platform": "asap7",
+                    "module_name": module_name,
+                    "output_dir": str(out),
+                    "cached": False,
+                    "reproducibility": manifest,
+                    **trust_metadata(
+                        source="tool",
+                        tool="openroad-orfs",
+                        tool_available=True,
+                        command=sta_cmd,
+                        artifacts=artifacts,
+                    ),
+                    "overview": overview,
+                    "qor": {
+                        "setup_worst_slack_ps": slack,
+                        "core_clock_fmax_mhz": fmax_mhz,
+                    },
+                    "summary": _summarize(sta_report),
+                    "report_tail": "\n".join(sta_report.splitlines()[-80:]),
+                },
+                issues=[] if slack >= 0 else ["Synthesis does not meet 1 GHz"],
+            )
 
         artifacts = _collect_artifacts(out, work, module_name)
         artifacts.update({
@@ -399,6 +634,8 @@ def _config(
     swap_arithmetic_operators: bool = False,
     setup_slack_margin: float = 0.0,
     abc_clock_period_ps: float | None = None,
+    has_high_fanout_repair: bool = False,
+    has_post_floorplan_tcl: bool = False,
 ) -> str:
     macro_config = ""
     if has_macros:
@@ -408,6 +645,16 @@ export ADDITIONAL_LIBS = $(sort $(wildcard $(DESIGN_HOME)/$(PLATFORM)/$(DESIGN_N
 {('export ADDITIONAL_GDS = $(sort $(wildcard $(DESIGN_HOME)/$(PLATFORM)/$(DESIGN_NAME)/macros/*.gds))' if has_macro_gds else 'export GDS_ALLOW_EMPTY = fakeram.* srambank_.*')}
 {('export MACRO_PLACEMENT_TCL = $(DESIGN_HOME)/$(PLATFORM)/$(DESIGN_NAME)/macro_placement.tcl' if has_macro_placement else '')}
 """
+    high_fanout_config = (
+        "export POST_RESIZE_TCL = $(DESIGN_HOME)/$(PLATFORM)/$(DESIGN_NAME)/targeted_fanout.tcl\n"
+        if has_high_fanout_repair
+        else ""
+    )
+    post_floorplan_config = (
+        "export POST_FLOORPLAN_TCL = $(DESIGN_HOME)/$(PLATFORM)/$(DESIGN_NAME)/post_floorplan.tcl\n"
+        if has_post_floorplan_tcl
+        else ""
+    )
     if timing_effort in {"closure", "closure_no_cts"}:
         skip_cts_repair = 1 if timing_effort == "closure_no_cts" else 0
         timing_config = f"""export SKIP_LAST_GASP = 0
@@ -454,6 +701,8 @@ export DESIGN_NAME = {module_name}
 export CORNER = {corner}
 export ASAP7_USE_VT = {cell_vt}
 {macro_config}
+{high_fanout_config}
+{post_floorplan_config}
 
 export VERILOG_FILES = {verilog_files}
 export SDC_FILE = $(DESIGN_HOME)/$(PLATFORM)/$(DESIGN_NAME)/constraint.sdc
@@ -520,16 +769,24 @@ def _manifest(
     swap_arithmetic_operators: bool = False,
     generate_gds: bool = True,
     max_fanout: int | None = None,
+    high_fanout_nets: List[str] | None = None,
+    high_fanout_max: int = 8,
+    high_fanout_buffer_cell: str = "BUFx16f_ASAP7_75t_R",
     setup_slack_margin: float = 0.0,
     abc_clock_period_ps: float | None = None,
+    io_delay_percent: float = 0.2,
+    io_false_path_ports: List[str] | None = None,
     macro_lefs: List[Path] | None = None,
     macro_libs: List[Path] | None = None,
     macro_gds: List[Path] | None = None,
     macro_placement_tcl: Path | None = None,
+    post_floorplan_tcl: Path | None = None,
 ) -> Dict[str, Any]:
     macro_files = [*(macro_lefs or []), *(macro_libs or []), *(macro_gds or [])]
     if macro_placement_tcl:
         macro_files.append(macro_placement_tcl)
+    if post_floorplan_tcl:
+        macro_files.append(post_floorplan_tcl)
     macro_hashes = {
         path.name: hashlib.sha256(path.read_bytes()).hexdigest()
         for path in macro_files
@@ -551,8 +808,16 @@ def _manifest(
         "swap_arithmetic_operators": swap_arithmetic_operators,
         "generate_gds": generate_gds,
         "max_fanout": max_fanout,
+        "high_fanout_nets": high_fanout_nets,
+        "high_fanout_max": high_fanout_max,
+        "high_fanout_buffer_cell": high_fanout_buffer_cell,
         "setup_slack_margin": setup_slack_margin,
         "abc_clock_period_ps": abc_clock_period_ps,
+        "io_delay_percent": io_delay_percent,
+        "io_false_path_ports": io_false_path_ports,
+        "post_floorplan_tcl": (
+            post_floorplan_tcl.name if post_floorplan_tcl is not None else None
+        ),
         "openroad_image": image,
         "flow": "openroad-orfs",
         "macro_hashes": macro_hashes,
@@ -579,8 +844,16 @@ def _manifest(
             "swap_arithmetic_operators": swap_arithmetic_operators,
             "generate_gds": generate_gds,
             "max_fanout": max_fanout,
+            "high_fanout_nets": high_fanout_nets,
+            "high_fanout_max": high_fanout_max,
+            "high_fanout_buffer_cell": high_fanout_buffer_cell,
             "setup_slack_margin": setup_slack_margin,
             "abc_clock_period_ps": abc_clock_period_ps,
+            "io_delay_percent": io_delay_percent,
+            "io_false_path_ports": io_false_path_ports,
+            "post_floorplan_tcl": (
+                post_floorplan_tcl.name if post_floorplan_tcl is not None else None
+            ),
             "macros": sorted(macro_hashes),
         },
     }
@@ -652,18 +925,26 @@ def _sdc(
     clock_port: str,
     clock_period: float,
     max_fanout: int | None = None,
+    io_delay_percent: float = 0.2,
+    io_false_path_ports: List[str] | None = None,
 ) -> str:
     fanout_constraint = (
         f"set_max_fanout {max_fanout} [current_design]\n"
         if max_fanout is not None
         else ""
     )
+    false_path_sdc = ""
+    for pattern in io_false_path_ports or []:
+        false_path_sdc += f"set_false_path -to [get_ports -quiet \"{pattern}\"]\n"
+        false_path_sdc += (
+            f"set_false_path -from [get_ports -quiet \"{pattern}\"]\n"
+        )
     return f"""current_design {module_name}
 
 set clk_name core_clock
 set clk_port_name {clock_port}
 set clk_period {clock_period}
-set clk_io_pct 0.2
+set clk_io_pct {io_delay_percent}
 
 set clk_port [get_ports $clk_port_name]
 create_clock -name $clk_name -period $clk_period $clk_port
@@ -674,7 +955,115 @@ create_clock -name $clk_io_name -period $clk_period
 set non_clock_inputs [all_inputs -no_clocks]
 set_input_delay [expr $clk_period * $clk_io_pct] -clock $clk_io_name $non_clock_inputs
 set_output_delay [expr $clk_period * $clk_io_pct] -clock $clk_io_name [all_outputs]
+{false_path_sdc}
 """
+
+
+def _synthesis_sta_tcl(
+    module_name: str,
+    cell_vt: str,
+    macro_libs: List[str] | None = None,
+) -> str:
+    """OpenROAD Tcl that reports setup timing on the synthesized ODB."""
+    vt = str(cell_vt).upper()
+    libs = [
+        f"/OpenROAD-flow-scripts/flow/platforms/asap7/lib/NLDM/asap7sc7p5t_AO_{vt}_TT_nldm_211120.lib.gz",
+        f"/OpenROAD-flow-scripts/flow/platforms/asap7/lib/NLDM/asap7sc7p5t_INVBUF_{vt}_TT_nldm_220122.lib.gz",
+        f"/OpenROAD-flow-scripts/flow/platforms/asap7/lib/NLDM/asap7sc7p5t_OA_{vt}_TT_nldm_211120.lib.gz",
+        f"/OpenROAD-flow-scripts/flow/platforms/asap7/lib/NLDM/asap7sc7p5t_SEQ_{vt}_TT_nldm_220123.lib",
+        f"/OpenROAD-flow-scripts/flow/platforms/asap7/lib/NLDM/asap7sc7p5t_SIMPLE_{vt}_TT_nldm_211120.lib.gz",
+    ]
+    for macro_lib in macro_libs or []:
+        libs.append(
+            f"/OpenROAD-flow-scripts/flow/designs/asap7/{module_name}/macros/"
+            f"{Path(macro_lib).name}"
+        )
+    lines = [f"read_liberty {lib}" for lib in libs]
+    lines.append(
+        f"read_db /OpenROAD-flow-scripts/flow/results/asap7/{module_name}/base/1_synth.odb"
+    )
+    lines.append(
+        f"read_sdc /OpenROAD-flow-scripts/flow/results/asap7/{module_name}/base/1_synth.sdc"
+    )
+    lines.append("report_checks -path_delay max -digits 3")
+    return "\n".join(lines) + "\n"
+
+
+def _parse_synthesis_sta(output: str) -> Dict[str, Any]:
+    """Extract worst setup slack from an OpenROAD report_checks output."""
+    slack = None
+    for line in output.splitlines():
+        match = re.search(
+            r"(-?[0-9]+\.[0-9]+)\s+slack\s+\((VIOLATED|MET)\)",
+            line,
+        )
+        if match:
+            slack = float(match.group(1))
+            break
+    if slack is None:
+        return {
+            "status": "failed",
+            "message": "Could not parse STA slack",
+        }
+    return {
+        "status": "success",
+        "worst_setup_slack_ps": slack,
+        "verdict": "PASS" if slack >= 0 else "FAIL",
+    }
+
+
+def _targeted_fanout_tcl(
+    high_fanout_nets: List[str],
+    high_fanout_max: int = 8,
+    buffer_cell: str = "BUFx16f_ASAP7_75t_R",
+) -> str:
+    """Build an OpenROAD Tcl hook that splits only named high-fanout nets.
+
+    The normal ORFS repair flow is left untouched.  After placement repair,
+    the hook finds each named net's load pins and inserts one buffer before
+    each group of loads, so the original driver fanout falls to the requested
+    limit without globally over-buffering the rest of the design.
+    """
+    if not high_fanout_nets:
+        return ""
+    lines = [
+        "proc chipagent_split_high_fanout_net { pattern max_fanout buffer_cell } {",
+        "  set nets [get_nets -hier $pattern]",
+        "  if { [llength $nets] == 0 } {",
+        "    puts \"ChipAgent: high-fanout net pattern '$pattern' not found; skipping\"",
+        "    return",
+        "  }",
+        "  foreach net $nets {",
+        "    set loads [get_pins -of $net -filter {direction == input}]",
+        "    set load_count [llength $loads]",
+        "    if { $load_count <= $max_fanout } { continue }",
+        "    set buffer_groups [expr {($load_count + $max_fanout - 1) / $max_fanout - 1}]",
+        "    set keep [expr {$load_count - $buffer_groups * $max_fanout}]",
+        "    regsub -all {[^A-Za-z0-9_]} $pattern \"_\" name_base",
+        "    for { set g 1 } { $g <= $buffer_groups } { incr g } {",
+        "      set start [expr {$keep + ($g - 1) * $max_fanout}]",
+        "      set end [expr {$start + $max_fanout - 1}]",
+        "      set group [lrange $loads $start $end]",
+        "      insert_buffer -net $net -load_pins $group \\",
+        "        -buffer_cell $buffer_cell \\",
+        "        -buffer_name \"chipagent_hf_${name_base}_${g}\" \\",
+        "        -net_name \"chipagent_hf_${name_base}_net_${g}\"",
+        "      puts \"ChipAgent: split $pattern group $g ($max_fanout loads)\"",
+        "    }",
+        "  }",
+        "}",
+    ]
+    for pattern in high_fanout_nets:
+        lines.append(
+            f"chipagent_split_high_fanout_net {{{pattern}}} "
+            f"{high_fanout_max} {buffer_cell}"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _high_fanout_buffer_cell(cell_vt: str) -> str:
+    suffix = {"RVT": "R", "LVT": "L", "SLVT": "SL"}[cell_vt.upper()]
+    return f"BUFx16f_ASAP7_75t_{suffix}"
 
 
 def _collect_artifacts(out: Path, work: Path, module_name: str) -> Dict[str, str]:
@@ -999,7 +1388,7 @@ def _summary_markdown(
 | Target frequency | {value(target.get('frequency_mhz'), ' MHz')} |
 | Clock period | {value(target.get('clock_period_ps'), ' ps')} |
 | PVT corner | {value(target.get('corner'))} |
-| Analysis | Post-route STA with extracted parasitics |
+| Analysis | {overview.get('analysis', 'Post-route STA with extracted parasitics')} |
 
 ## Timing
 
