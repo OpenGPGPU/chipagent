@@ -677,6 +677,11 @@ export GPL_TIMING_DRIVEN = 0
         if abc_clock_period_ps is not None
         else ""
     )
+    # Graphics command buffers and compute blocks intentionally contain
+    # inferred memories larger than ORFS's conservative 4096-bit default.
+    # Keep the flow behavior consistent with the established graphics PPA
+    # baselines while still allowing callers to override it in config later.
+    synth_memory_config = "export SYNTH_MEMORY_MAX_BITS = 16777216\n"
     synth_use_syn = 1 if synthesis_engine == "syn" else 0
     retiming_config = (
         f"export SYNTH_RETIME_MODULES = {module_name}\n"
@@ -713,6 +718,7 @@ export CORE_MARGIN = 0.5
 export PLACE_DENSITY = {place_density}
 
 export SYNTH_USE_SYN = {synth_use_syn}
+{synth_memory_config}
 {retiming_config}{arithmetic_config}{abc_config}export SKIP_REPORT_METRICS = 0
 {timing_config}
 """
