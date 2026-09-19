@@ -4,6 +4,7 @@ from chipagent.tools.phys_flow_asap7 import (
     _build_overview,
     _collect_qor,
     _config,
+    _detect_clock_port,
     _high_fanout_buffer_cell,
     _manifest,
     _next_numbered_output,
@@ -384,3 +385,24 @@ def test_default_output_directories_are_sequential(tmp_path):
     (tmp_path / "not_numbered").mkdir()
 
     assert _next_numbered_output(tmp_path, "DecodePipe").name == "004_DecodePipe"
+
+
+def test_detect_clock_port_prefers_clk_over_clock():
+    rtl = "module top(input clk, input clock, input rst); endmodule\n"
+    assert _detect_clock_port(rtl, "top") == "clk"
+
+
+def test_detect_clock_port_finds_chisel_clock():
+    rtl = "module SharedL2Slice(\n  input clock,\n  input reset,\n  input io_req\n);\nendmodule\n"
+    assert _detect_clock_port(rtl, "SharedL2Slice") == "clock"
+
+
+def test_detect_clock_port_returns_none_for_unknown_module():
+    rtl = "module top(input clk); endmodule\n"
+    assert _detect_clock_port(rtl, "missing") is None
+
+
+def test_sdc_fails_loudly_on_missing_clock_port():
+    sdc = _sdc("top", "clk", 1000.0)
+    assert "get_ports -quiet" in sdc
+    assert "not found in" in sdc

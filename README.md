@@ -191,8 +191,6 @@ Claude：（生成代码，调用 chipagent 验证工具，迭代优化）
 Claude：（调 chipagent_run_dse，返回 tradeoff 表 + 选定设计）
 ```
 
-详见 [CLAUDE_CODE_INTEGRATION.md](CLAUDE_CODE_INTEGRATION.md)。
-
 ### 方式二：CLI 直接使用
 
 ```bash
@@ -313,10 +311,8 @@ pytest tests/test_chat_mcp.py       # MCP 工具 + 意图路由
 
 | 文档 | 说明 |
 |---|---|
-| [CLAUDE_CODE_INTEGRATION.md](CLAUDE_CODE_INTEGRATION.md) | Claude Code 集成指南（完整工具清单 + 使用示例） |
 | [examples/README.md](examples/README.md) | 详细使用示例（MCP + CLI） |
 | [ChipAgent_Architecture_v3.0.md](ChipAgent_Architecture_v3.0.md) | 当前架构来源：EDA 工具 MCP 服务层 |
-| [REFACTORING_PLAN.md](REFACTORING_PLAN.md) | 从全能 AI 转向 EDA 工具服务层的重构计划 |
 
 ## 许可
 

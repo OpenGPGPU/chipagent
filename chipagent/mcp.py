@@ -1078,7 +1078,7 @@ def chipagent_run_physical_flow_asap7(
     reg_code: str,
     rtl_files: Optional[List[str]] = None,
     module_name: str = "dut",
-    clock_port: str = "clk",
+    clock_port: Optional[str] = None,
     clock_period: float = 310.0,
     core_utilization: int = 10,
     place_density: float = 0.20,
@@ -1196,7 +1196,7 @@ def chipagent_run_physical_flow(
     rtl_files: Optional[List[str]] = None,
     module_name: str = "dut",
     platform: str = "asap7",
-    clock_port: str = "clk",
+    clock_port: Optional[str] = None,
     clock_period: float = 310.0,
     core_utilization: int = 10,
     place_density: float = 0.20,
@@ -1301,7 +1301,7 @@ def chipagent_run_synthesis_asap7(
     reg_code: str,
     rtl_files: Optional[List[str]] = None,
     module_name: str = "dut",
-    clock_port: str = "clk",
+    clock_port: Optional[str] = None,
     clock_period: float = 1000.0,
     corner: str = "TC",
     cell_vt: str = "SLVT",
@@ -1791,7 +1791,7 @@ def chipagent_run_flow(
     output_dir: Optional[str] = None,
     run_formality: bool = True,
     run_physical: bool = False,
-    physical_clock_port: str = "clk",
+    physical_clock_port: Optional[str] = None,
     physical_clock_period: float = 310.0,
     physical_timeout: int = 1800,
     physical_cache: bool = True,
@@ -1816,7 +1816,8 @@ def chipagent_run_flow(
         output_dir: Output directory; defaults to generated/flows/<module_name>
         run_formality: Compare original RTL against synthesized netlist when synthesis succeeds
         run_physical: Run a physical implementation flow
-        physical_clock_port: Clock port used in the generated SDC
+        physical_clock_port: Clock port used in the generated SDC;
+            auto-detected from the RTL when omitted
         physical_clock_period: SDC clock period, default 310
         physical_timeout: Physical flow timeout in seconds
         physical_cache: Reuse matching physical results when present
@@ -2041,7 +2042,7 @@ def chipagent_run_example_flow(
         module_name=data["module_name"],
         output_dir=output_dir or str(Path("generated") / "examples" / example),
         run_physical=run_physical,
-        physical_clock_port=data.get("clock_port", "clk"),
+        physical_clock_port=data.get("clock_port"),
     )
 
 
@@ -2532,7 +2533,7 @@ def chipagent_estimate_performance(
     liberty_file: Optional[str] = None,
     liberty_files: Optional[list[str]] = None,
     sdc: Optional[str] = None,
-    clock_port: str = "clk",
+    clock_port: Optional[str] = None,
     output_dir: Optional[str] = None,
 ) -> str:
     """Measure performance using Yosys technology mapping and OpenSTA.

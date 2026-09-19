@@ -63,7 +63,7 @@ class SVParameterDSETool(Tool):
                 output_dir=str(candidate_dir),
                 run_formality=False,
                 run_physical=run_physical,
-                physical_clock_port=ctx.inputs.get("physical_clock_port") or "clk",
+                physical_clock_port=ctx.inputs.get("physical_clock_port"),
                 physical_clock_period=float(ctx.inputs.get("physical_clock_period") or 310.0),
                 physical_timeout=int(ctx.inputs.get("physical_timeout") or 1800),
             )

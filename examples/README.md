@@ -79,8 +79,6 @@ Claude：（调 chipagent_list_skills 和 chipagent_list_tools）
       → 列出 Skill + Python-backed 工具，并标出 physical/heavy 工具
 ```
 
-> 详见 [CLAUDE_CODE_INTEGRATION.md](../CLAUDE_CODE_INTEGRATION.md) 完整工具清单。
-
 ### 6. 一键跑通 EDA + ASAP7 物理流
 
 ```

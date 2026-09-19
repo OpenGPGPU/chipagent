@@ -366,7 +366,16 @@ write_verilog -noattr mapped.v
 
             target_freq_mhz = ctx.inputs.get("target_freq_mhz")
             default_period_ns = 1000.0 / float(target_freq_mhz) if target_freq_mhz else 10.0
-            clock_port = str(ctx.inputs.get("clock_port") or "clk")
+            from chipagent.tools.phys_flow_asap7 import _detect_clock_port
+            clock_port_raw = ctx.inputs.get("clock_port")
+            if clock_port_raw:
+                clock_port = str(clock_port_raw)
+            else:
+                detected = _detect_clock_port(
+                    (ctx.inputs.get("reg_code") or ""),
+                    top_module,
+                )
+                clock_port = detected or "clk"
             if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", clock_port):
                 return ToolResult(
                     result={"status": "error", "message": f"Invalid clock_port: {clock_port}"},

@@ -30,6 +30,61 @@ def _rtl_source(reg_code: str, rtl_files: Any) -> str:
     return "\n".join(chunks).strip()
 
 
+def _detect_clock_port(reg_code: str, module_name: str) -> str | None:
+    """Guess the clock input port from the top module's port list.
+
+    Returns the best candidate port name, or None when no plausible
+    clock is found. Callers fall back to the configured default.
+    """
+    body = _top_module_ports(reg_code, module_name)
+    if not body:
+        return None
+    ports = re.findall(r"\b([A-Za-z_][A-Za-z0-9_$]*)\b", body)
+    seen: List[str] = []
+    for port in ports:
+        if port not in seen:
+            seen.append(port)
+
+    def score(name: str) -> int | None:
+        lowered = name.lower()
+        if lowered in {"clk", "clock"}:
+            return 0 if lowered == "clk" else 1
+        if lowered in {"i_clk", "clk_i", "sys_clk", "core_clk", "aclk"}:
+            return 2
+        if "clk" in lowered or "clock" in lowered:
+            return 3
+        return None
+
+    ranked = sorted(
+        ((score(name), name) for name in seen if score(name) is not None),
+        key=lambda item: (item[0], item[1]),
+    )
+    return ranked[0][1] if ranked else None
+
+
+def _top_module_ports(reg_code: str, module_name: str) -> str:
+    """Extract the raw port-list text of the named module, if present."""
+    pattern = re.compile(
+        r"\bmodule\s+" + re.escape(module_name) + r"\b(.*?);\s*",
+        re.DOTALL,
+    )
+    for match in pattern.finditer(reg_code):
+        header = match.group(1)
+        depth = 0
+        start = header.find("(")
+        if start < 0:
+            continue
+        for index in range(start, len(header)):
+            char = header[index]
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    return header[start + 1 : index]
+    return ""
+
+
 class ASAP7PhysicalFlowTool(Tool):
     name = "run_physical_flow_asap7"
 
@@ -75,7 +130,16 @@ class ASAP7PhysicalFlowTool(Tool):
         work = out / "orfs-work"
         out.mkdir(parents=True, exist_ok=True)
 
-        clock_port = ctx.inputs.get("clock_port") or "clk"
+        clock_port_raw = ctx.inputs.get("clock_port")
+        detected_clock_port = _detect_clock_port(reg_code, module_name)
+        clock_port_auto = False
+        if clock_port_raw:
+            clock_port = str(clock_port_raw)
+        elif detected_clock_port:
+            clock_port = detected_clock_port
+            clock_port_auto = True
+        else:
+            clock_port = "clk"
         clock_period = float(ctx.inputs.get("clock_period") or 310.0)
         core_utilization = int(ctx.inputs.get("core_utilization") or 10)
         place_density = float(ctx.inputs.get("place_density") or 0.20)
@@ -235,6 +299,7 @@ class ASAP7PhysicalFlowTool(Tool):
             module_name=module_name,
             image=image,
             clock_port=clock_port,
+            clock_port_auto=clock_port_auto,
             clock_period=clock_period,
             core_utilization=core_utilization,
             place_density=place_density,
@@ -763,6 +828,7 @@ def _manifest(
     module_name: str,
     image: str,
     clock_port: str,
+    clock_port_auto: bool = False,
     clock_period: float,
     core_utilization: int,
     place_density: float,
@@ -802,6 +868,7 @@ def _manifest(
         "module_name": module_name,
         "reg_code": reg_code,
         "clock_port": clock_port,
+        "clock_port_auto": clock_port_auto,
         "clock_period": clock_period,
         "core_utilization": core_utilization,
         "place_density": place_density,
@@ -838,6 +905,7 @@ def _manifest(
         "openroad_image": image,
         "parameters": {
             "clock_port": clock_port,
+            "clock_port_auto": clock_port_auto,
             "clock_period": clock_period,
             "core_utilization": core_utilization,
             "place_density": place_density,
@@ -952,7 +1020,10 @@ set clk_port_name {clock_port}
 set clk_period {clock_period}
 set clk_io_pct {io_delay_percent}
 
-set clk_port [get_ports $clk_port_name]
+set clk_port [get_ports -quiet $clk_port_name]
+if {{ $clk_port eq "" }} {{
+  error "ChipAgent: clock port '$clk_port_name' not found in [current_design]; pass clock_port explicitly"
+}}
 create_clock -name $clk_name -period $clk_period $clk_port
 set clk_io_name vclk_$clk_name
 create_clock -name $clk_io_name -period $clk_period
