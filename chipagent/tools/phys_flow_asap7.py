@@ -1105,15 +1105,21 @@ def _targeted_fanout_tcl(
         return ""
     lines = [
         "proc chipagent_split_high_fanout_net { pattern max_fanout buffer_cell } {",
-        "  set nets [get_nets -hier $pattern]",
+        "  set glob $pattern",
+        "  if { [string first \"*\" $pattern] < 0 } {",
+        "    set glob \"*$pattern*\"",
+        "  }",
+        "  set nets [get_nets -hier -quiet $glob]",
+        "  puts \"ChipAgent: high-fanout pattern '$pattern' (glob '$glob') matched [llength $nets] nets\"",
         "  if { [llength $nets] == 0 } {",
-        "    puts \"ChipAgent: high-fanout net pattern '$pattern' not found; skipping\"",
         "    return",
         "  }",
+        "  set split_count 0",
         "  foreach net $nets {",
         "    set loads [get_pins -of $net -filter {direction == input}]",
         "    set load_count [llength $loads]",
         "    if { $load_count <= $max_fanout } { continue }",
+        "    incr split_count",
         "    set buffer_groups [expr {($load_count + $max_fanout - 1) / $max_fanout - 1}]",
         "    set keep [expr {$load_count - $buffer_groups * $max_fanout}]",
         "    regsub -all {[^A-Za-z0-9_]} $pattern \"_\" name_base",
@@ -1128,6 +1134,7 @@ def _targeted_fanout_tcl(
         "      puts \"ChipAgent: split $pattern group $g ($max_fanout loads)\"",
         "    }",
         "  }",
+        "  puts \"ChipAgent: high-fanout pattern '$pattern' split $split_count nets\"",
         "}",
     ]
     for pattern in high_fanout_nets:

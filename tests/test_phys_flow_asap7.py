@@ -228,9 +228,17 @@ def test_targeted_fanout_tcl_splits_named_nets():
         high_fanout_max=6,
     )
 
-    assert "get_nets -hier $pattern" in tcl
+    assert "get_nets -hier -quiet $glob" in tcl
     assert "insert_buffer -net $net -load_pins $group" in tcl
     assert "chipagent_split_high_fanout_net {storeTable.pendingEntry} 6" in tcl
+
+
+def test_targeted_fanout_tcl_wraps_bare_pattern_as_substring():
+    tcl = _targeted_fanout_tcl(["index"], high_fanout_max=8)
+
+    assert 'set glob "*$pattern*"' in tcl
+    assert "matched [llength $nets] nets" in tcl
+    assert "split $split_count nets" in tcl
 
 
 def test_targeted_fanout_helper_is_empty_without_targets():
