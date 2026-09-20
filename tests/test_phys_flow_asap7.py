@@ -241,6 +241,85 @@ def test_targeted_fanout_tcl_wraps_bare_pattern_as_substring():
     assert "split $split_count nets" in tcl
 
 
+def test_targeted_fanout_tcl_logs_to_dedicated_file():
+    tcl = _targeted_fanout_tcl(["index"], high_fanout_max=8)
+
+    assert "chipagent_highfanout.log" in tcl
+    assert "proc chipagent_log" in tcl
+    assert tcl.rstrip().endswith("close $chipagent_log_fh }")
+
+
+def test_partial_cache_eligible_needs_def_odb_and_qor(tmp_path):
+    import json as json_lib
+
+    from chipagent.tools.phys_flow_asap7 import _partial_cache_eligible
+
+    out = tmp_path / "run"
+    work = out / "orfs-work"
+    results = work / "results" / "base"
+    logs = work / "logs" / "base"
+    results.mkdir(parents=True)
+    logs.mkdir(parents=True)
+
+    assert _partial_cache_eligible(out, work, "top") is False
+
+    (results / "6_final.def").write_text("VERSION 5.8 ;\n")
+    (results / "6_final.odb").write_text("odb\n")
+    assert _partial_cache_eligible(out, work, "top") is False
+
+    logs.joinpath("6_report.json").write_text(
+        json_lib.dumps({
+            "finish__timing__setup__ws": 10.0,
+            "finish__timing__hold__ws": 5.0,
+        })
+    )
+    assert _partial_cache_eligible(out, work, "top") is True
+
+
+def test_is_infra_make_failure_matches_file_op_errors():
+    from chipagent.tools.phys_flow_asap7 import _is_infra_make_failure
+
+    assert _is_infra_make_failure(
+        "mv: cannot stat './logs/x/base/5_2_route.tmp.log': No such file or directory\n"
+        "make[1]: *** [Makefile:554: do-5_2_route] Error 1\n"
+    ) is True
+    assert _is_infra_make_failure(
+        "ERROR: Module `foo' is not part of the design.\n"
+        "make: *** [Makefile:274: 1_1_yosys_canonicalize.rtlil] Error 2\n"
+    ) is False
+    assert _is_infra_make_failure("all good, no errors here") is False
+
+
+def test_engine_warnings_flag_syn_incompatibilities():
+    from chipagent.tools.phys_flow_asap7 import _engine_warnings
+
+    warnings = _engine_warnings("syn", True, 800.0)
+
+    assert len(warnings) == 2
+    assert any("swap_arithmetic_operators" in warning for warning in warnings)
+    assert any("abc_clock_period_ps" in warning for warning in warnings)
+    assert _engine_warnings("yosys", True, 800.0) == []
+    assert _engine_warnings("syn", False, None) == []
+
+
+def test_hook_log_summary_extracts_chipagent_lines(tmp_path):
+    from chipagent.tools.phys_flow_asap7 import _hook_log_summary
+
+    log = tmp_path / "chipagent_highfanout.log"
+    log.write_text(
+        "ChipAgent: high-fanout hook logging to ./designs/x\n"
+        "some other tool noise\n"
+        "ChipAgent: high-fanout pattern 'index' split 3 nets\n"
+    )
+
+    assert _hook_log_summary(str(log)) == [
+        "ChipAgent: high-fanout hook logging to ./designs/x",
+        "ChipAgent: high-fanout pattern 'index' split 3 nets",
+    ]
+    assert _hook_log_summary(None) == []
+    assert _hook_log_summary(str(tmp_path / "missing.log")) == []
+
+
 def test_targeted_fanout_helper_is_empty_without_targets():
     assert _targeted_fanout_tcl([], 8) == ""
 
@@ -359,6 +438,40 @@ Path Type: max
     assert path["net_delay_ps"] == 10.0
     assert path["cell_count"] == 2
     assert path["dominant_cell_types"][0]["cell_type"] == "AND2x1"
+    assert path["group"] == "core_clock"
+    assert path["per_group"]["core_clock"]["slack_ps"] == -10.0
+
+
+def test_parse_critical_path_reports_worst_per_group():
+    from chipagent.tools.phys_flow_asap7 import _parse_critical_path
+
+    report = """Startpoint: io_in (input port)
+Endpoint: io_out (output port)
+Path Group: vclk_core_clock
+Path Type: max
+
+                                     500.00   data arrival time
+                                    -400.00   slack (VIOLATED)
+Startpoint: launch_q (rising edge-triggered flip-flop)
+Endpoint: capture_q (rising edge-triggered flip-flop)
+Path Group: core_clock
+Path Type: max
+
+      1    1.00   4.00   20.00   20.00 ^ launch_q/Q (DFFx1)
+                   2.00    3.00   23.00 ^ add/A (AND2x1)
+      1    1.00   5.00   30.00   53.00 ^ add/Y (AND2x1)
+                   2.00    7.00   60.00 ^ capture_q/D (DFFx1)
+                                  60.00   data arrival time
+                                 -10.00   slack (VIOLATED)
+"""
+
+    path = _parse_critical_path(report)
+
+    assert path is not None
+    assert path["slack_ps"] == -400.0
+    assert path["group"] == "vclk_core_clock"
+    assert path["per_group"]["vclk_core_clock"]["slack_ps"] == -400.0
+    assert path["per_group"]["core_clock"]["slack_ps"] == -10.0
 
 
 def test_overview_leads_with_plain_pass_fail_result():

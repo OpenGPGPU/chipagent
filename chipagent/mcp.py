@@ -791,6 +791,66 @@ def chipagent_analyze_timing(
 
 
 @mcp.tool()
+def chipagent_run_postroute_sta(
+    physical_output_dir: Optional[str] = None,
+    odb: Optional[str] = None,
+    spef: Optional[str] = None,
+    sdc: Optional[str] = None,
+    module_name: str = "dut",
+    corner: str = "TC",
+    cell_vt: str = "SLVT",
+    liberty_files: Optional[List[str]] = None,
+    max_paths: int = 200,
+    output_dir: Optional[str] = None,
+    timeout: int = 600,
+) -> str:
+    """Run post-route OpenSTA on ORFS route artifacts with parasitics.
+
+    Reads a routed ODB plus extracted SPEF and reports setup/hold slack,
+    per-group worst paths, and an IO-boundary vs internal split, so a
+    parent-owned boundary limiter is never mistaken for block logic.
+
+    Args:
+        physical_output_dir: ChipAgent ASAP7 physical flow output directory;
+            ODB, SPEF, and SDC are auto-located from its orfs-work tree
+        odb: Routed OpenROAD database (alternative to physical_output_dir)
+        spef: Extracted parasitics (optional; auto-located)
+        sdc: Timing constraints (optional; auto-located)
+        module_name: Top module name used for artifact paths
+        corner: PVT corner label for reporting
+        cell_vt: ASAP7 threshold flavor for the in-image Liberty set
+        liberty_files: Optional host Liberty overrides
+        max_paths: report_checks group_path_count per delay type
+        output_dir: Optional directory for the STA script and log
+        timeout: STA run timeout in seconds
+
+    Returns:
+        Post-route timing report with setup/hold, per-group worst paths,
+        and internal vs boundary violation split
+    """
+    from .tools.base import ToolContext
+    from .tools.postroute_sta import PostRouteSTATool
+    from .models import TaskObject
+    res = PostRouteSTATool().run(ToolContext(
+        task=TaskObject(task_type="postroute_sta", module_name=module_name, description=""),
+        inputs={
+            "physical_output_dir": physical_output_dir,
+            "odb": odb,
+            "spef": spef,
+            "sdc": sdc,
+            "module_name": module_name,
+            "corner": corner,
+            "cell_vt": cell_vt,
+            "liberty_files": liberty_files,
+            "max_paths": max_paths,
+            "output_dir": output_dir,
+            "timeout": timeout,
+        },
+    ))
+    return _tool_result_text(res, "run_postroute_sta")
+
+
+@mcp.tool()
 def chipagent_optimize_area(
     netlist: Optional[str] = None,
     reg_code: Optional[str] = None,
@@ -1140,7 +1200,10 @@ def chipagent_run_physical_flow_asap7(
             and let OpenROAD select implementations using physical timing
         max_fanout: Optional SDC maximum fanout constraint
         high_fanout_nets: Hierarchical net patterns whose fanout should be
-            repaired without globally over-buffering the design
+            repaired without globally over-buffering the design. Bare names
+            match as substrings; with the yosys engine, canonicalization
+            mangles net names, so patterns may not match — check the
+            highfanout_log artifact for the matched/split counts
         high_fanout_max: Maximum fanout applied to the named high-fanout nets
         setup_slack_margin: ORFS setup repair margin in nanoseconds
         abc_clock_period_ps: Optional tighter delay target passed to Yosys/ABC

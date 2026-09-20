@@ -158,7 +158,9 @@ ASAP7 physical flow 默认启用缓存：当 RTL、模块名、clock/placement �
 `["storeTable.pendingEntry"]`）和 `high_fanout_max` 后，ChipAgent 会在
 placement repair 阶段用 `insert_buffer` 只拆分指定层次化 net，并自动按
 `cell_vt` 选择 RVT/LVT/SLVT buffer 单元。全局 fanout 约束会造成整个设计
-过度插 buffer，这一参数用于替代它。
+过度插 buffer，这一参数用于替代它。无通配符的名字按子串匹配；注意 yosys
+综合会改写 net 名，匹配失败时检查 `highfanout_log` 产物中的 matched/split
+计数。
 
 推荐入口是工艺无关的 `chipagent_run_physical_flow`：它把 `platform` 作为
 显式参数（当前支持 `asap7`），工艺相关设置放在 `platform_options` 里；
@@ -215,7 +217,7 @@ python -m chipagent.mcp
 └──────────────────────┬──────────────────────────────┘
                        │ MCP (stdio)
 ┌──────────────────────▼──────────────────────────────┐
-│              ChipAgent MCP Server (53 tools)         │
+│              ChipAgent MCP Server (56 tools)         │
 │                  (chipagent.mcp)                     │
 │                                                      │
 │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌────────┐ │
@@ -234,14 +236,14 @@ python -m chipagent.mcp
 └──────────────────────────────────────────────────────┘
 ```
 
-### MCP 工具清单（53 个）
+### MCP 工具清单（56 个）
 
 | 类别 | 工具数 | 工具 |
 |---|---|---|
 | 设计探索 | 2 | `chipagent_run_dse` · `chipagent_run_skill` |
 | SV 参数探索 | 1 | `chipagent_run_sv_parameter_dse` |
-| 综合 | 5 | `chipagent_run_synthesis` · `chipagent_analyze_timing` · `chipagent_optimize_area` · `chipagent_analyze_power` · `chipagent_run_formality` |
-| 物理设计 | 7 | `chipagent_run_physical_flow_asap7` · `chipagent_create_floorplan` · `chipagent_run_placement` · `chipagent_run_cts` · `chipagent_run_routing` · `chipagent_run_drc_check` · `chipagent_run_lvs_check` |
+| 综合 | 6 | `chipagent_run_synthesis` · `chipagent_run_synthesis_asap7` · `chipagent_analyze_timing` · `chipagent_optimize_area` · `chipagent_analyze_power` · `chipagent_run_formality` |
+| 物理设计 | 9 | `chipagent_run_physical_flow` · `chipagent_run_physical_flow_asap7` · `chipagent_run_postroute_sta` · `chipagent_create_floorplan` · `chipagent_run_placement` · `chipagent_run_cts` · `chipagent_run_routing` · `chipagent_run_drc_check` · `chipagent_run_lvs_check` |
 | 端到端流程 | 2 | `chipagent_run_flow` · `chipagent_run_example_flow` |
 | 验证与量测 | 6 | `chipagent_run_simulation` · `chipagent_analyze_waveform` · `chipagent_elaborate` · `chipagent_check_register_alignment` · `chipagent_check_sw_hw_interface` · `chipagent_analyze_coverage` |
 | PPA 分析 | 4 | `chipagent_estimate_area` · `chipagent_estimate_performance` · `chipagent_estimate_power` · `chipagent_check_ppa_targets` |

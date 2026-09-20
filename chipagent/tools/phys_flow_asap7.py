@@ -208,6 +208,9 @@ class ASAP7PhysicalFlowTool(Tool):
                 },
                 issues=["Invalid input: abc_clock_period_ps"],
             )
+        warnings = _engine_warnings(
+            synthesis_engine, swap_arithmetic_operators, abc_clock_period_ps
+        )
         if corner not in {"BC", "TC", "WC"}:
             return ToolResult(
                 result={"status": "error", "message": f"Invalid ASAP7 corner: {corner}"},
@@ -636,13 +639,28 @@ class ASAP7PhysicalFlowTool(Tool):
             and Path(artifacts.get("final_def", "")).is_file()
             and Path(artifacts.get("final_odb", "")).is_file()
         )
+        route_odb_path = work / "results" / "base" / "5_2_route.odb"
+        if route_odb_path.is_file():
+            artifacts["route_odb"] = str(route_odb_path)
+        route_infra_failure = (
+            not timed_out
+            and returncode != 0
+            and not gds_export_only_failure
+            and route_odb_path.is_file()
+            and qor.get("route_drc_errors") == 0
+            and _is_infra_make_failure(report)
+        )
         status = (
             "timeout" if timed_out
             else "success" if returncode == 0
-            else "partial" if gds_export_only_failure
+            else "partial" if (gds_export_only_failure or route_infra_failure)
             else "failed"
         )
         diagnosis = _diagnose(report, status=status, timeout=timeout)
+        hook_summary = _hook_log_summary(artifacts.get("highfanout_log"))
+        if hook_summary:
+            diagnosis.setdefault("evidence", []).extend(hook_summary)
+            diagnosis["highfanout_hook"] = hook_summary
         overview = _build_overview(
             status=status,
             manifest=manifest,
@@ -673,11 +691,14 @@ class ASAP7PhysicalFlowTool(Tool):
                 "summary": _summarize(report),
                 "diagnosis": diagnosis,
                 "report_tail": "\n".join(report.splitlines()[-80:]),
+                "warnings": warnings,
             },
             issues=(
                 [] if returncode == 0
                 else ["GDS export failed after successful post-route analysis"]
                 if gds_export_only_failure
+                else ["ORFS Makefile failed after clean detailed route; route ODB and DRC are usable"]
+                if route_infra_failure
                 else ["OpenROAD ORFS ASAP7 flow failed"]
             ),
         )
@@ -933,6 +954,20 @@ def _manifest(
     }
 
 
+def _partial_cache_eligible(out: Path, work: Path, module_name: str) -> bool:
+    """A GDS-export-only failure is cacheable: DEF/ODB and QoR are valid."""
+    artifacts = _collect_artifacts(out, work, module_name)
+    qor = _collect_qor(work)
+    return bool(
+        qor.get("setup_worst_slack_ps") is not None
+        and qor.get("hold_worst_slack_ps") is not None
+        and artifacts.get("final_def")
+        and Path(artifacts["final_def"]).is_file()
+        and artifacts.get("final_odb")
+        and Path(artifacts["final_odb"]).is_file()
+    )
+
+
 def _cache_valid(out: Path, work: Path, manifest: Dict[str, Any]) -> bool:
     manifest_path = out / "flow_manifest.json"
     if not manifest_path.exists():
@@ -945,7 +980,14 @@ def _cache_valid(out: Path, work: Path, manifest: Dict[str, Any]) -> bool:
         out / "orfs_run.log",
     ]
     if (manifest.get("parameters") or {}).get("generate_gds", True):
-        required.append(work / "results" / "base" / "6_final.gds")
+        gds = work / "results" / "base" / "6_final.gds"
+        if gds.exists():
+            required.append(gds)
+        else:
+            module_name = manifest.get("module_name") or "top"
+            return all(path.exists() for path in required) and _partial_cache_eligible(
+                out, work, module_name
+            )
     return all(path.exists() for path in required)
 
 
@@ -960,9 +1002,13 @@ def _cached_result(out: Path, work: Path, module_name: str, manifest: Dict[str, 
     })
     report = (out / "orfs_run.log").read_text(encoding="utf-8", errors="replace")
     qor = _collect_qor(work)
-    diagnosis = _diagnose(report, status="success", timeout=0)
+    cached_partial = _partial_cache_eligible(out, work, module_name) and not (
+        work / "results" / "base" / "6_final.gds"
+    ).is_file()
+    cached_status = "partial" if cached_partial else "success"
+    diagnosis = _diagnose(report, status=cached_status, timeout=0)
     overview = _build_overview(
-        status="success",
+        status=cached_status,
         manifest=manifest,
         qor=qor,
         diagnosis=diagnosis,
@@ -972,7 +1018,7 @@ def _cached_result(out: Path, work: Path, module_name: str, manifest: Dict[str, 
     artifacts["simple_report"] = str(simple_report)
     return ToolResult(
         result={
-            "status": "success",
+            "status": cached_status,
             "platform": "asap7",
             "module_name": module_name,
             "output_dir": str(out),
@@ -990,7 +1036,11 @@ def _cached_result(out: Path, work: Path, module_name: str, manifest: Dict[str, 
             "diagnosis": diagnosis,
             "report_tail": "\n".join(report.splitlines()[-80:]),
         },
-        issues=[],
+        issues=(
+            ["GDS export failed after successful post-route analysis"]
+            if cached_partial
+            else []
+        ),
     )
 
 
@@ -1104,13 +1154,28 @@ def _targeted_fanout_tcl(
     if not high_fanout_nets:
         return ""
     lines = [
+        "set chipagent_log_fh \"\"",
+        "if { [info exists ::env(DESIGN_NAME)] && [info exists ::env(PLATFORM)] } {",
+        "  set chipagent_log_path \"./designs/$::env(PLATFORM)/$::env(DESIGN_NAME)/chipagent_highfanout.log\"",
+        "  if { ![catch { open $chipagent_log_path w } chipagent_log_fh] } {",
+        "    puts \"ChipAgent: high-fanout hook logging to $chipagent_log_path\"",
+        "  }",
+        "}",
+        "proc chipagent_log { msg } {",
+        "  global chipagent_log_fh",
+        "  if { $chipagent_log_fh ne \"\" } {",
+        "    puts $chipagent_log_fh $msg",
+        "    flush $chipagent_log_fh",
+        "  }",
+        "  puts $msg",
+        "}",
         "proc chipagent_split_high_fanout_net { pattern max_fanout buffer_cell } {",
         "  set glob $pattern",
         "  if { [string first \"*\" $pattern] < 0 } {",
         "    set glob \"*$pattern*\"",
         "  }",
         "  set nets [get_nets -hier -quiet $glob]",
-        "  puts \"ChipAgent: high-fanout pattern '$pattern' (glob '$glob') matched [llength $nets] nets\"",
+        "  chipagent_log \"ChipAgent: high-fanout pattern '$pattern' (glob '$glob') matched [llength $nets] nets\"",
         "  if { [llength $nets] == 0 } {",
         "    return",
         "  }",
@@ -1131,10 +1196,10 @@ def _targeted_fanout_tcl(
         "        -buffer_cell $buffer_cell \\",
         "        -buffer_name \"chipagent_hf_${name_base}_${g}\" \\",
         "        -net_name \"chipagent_hf_${name_base}_net_${g}\"",
-        "      puts \"ChipAgent: split $pattern group $g ($max_fanout loads)\"",
+        "      chipagent_log \"ChipAgent: split $pattern group $g ($max_fanout loads)\"",
         "    }",
         "  }",
-        "  puts \"ChipAgent: high-fanout pattern '$pattern' split $split_count nets\"",
+        "  chipagent_log \"ChipAgent: high-fanout pattern '$pattern' split $split_count nets\"",
         "}",
     ]
     for pattern in high_fanout_nets:
@@ -1142,6 +1207,7 @@ def _targeted_fanout_tcl(
             f"chipagent_split_high_fanout_net {{{pattern}}} "
             f"{high_fanout_max} {buffer_cell}"
         )
+    lines.append("if { $chipagent_log_fh ne \"\" } { close $chipagent_log_fh }")
     return "\n".join(lines) + "\n"
 
 
@@ -1178,6 +1244,9 @@ def _collect_artifacts(out: Path, work: Path, module_name: str) -> Dict[str, str
                     break
             if key in artifacts:
                 break
+    hook_log = work / "designs" / "asap7" / module_name / "chipagent_highfanout.log"
+    if hook_log.is_file():
+        artifacts["highfanout_log"] = str(hook_log)
     return artifacts
 
 
@@ -1252,8 +1321,10 @@ _OUTPUT_PINS = {
 
 
 def _parse_critical_path(report: str) -> Dict[str, Any] | None:
-    """Break down the worst real-clock setup path from an OpenSTA report.
+    """Break down the worst setup path per clock group from an OpenSTA report.
 
+    Returns the worst path overall with a per-group summary, so a virtual-IO
+    boundary limiter is never mistaken for the real-clock critical path.
     OpenSTA reports interconnect delay on the destination input-pin row and
     cell delay on the output-pin row.  Keeping these separate tells us whether
     another placement pass can plausibly help or whether RTL/logic depth is the
@@ -1268,7 +1339,7 @@ def _parse_critical_path(report: str) -> Dict[str, Any] | None:
         re.MULTILINE | re.DOTALL,
     )
     for match in header.finditer(report):
-        if match.group("type") != "max" or match.group("group") != "core_clock":
+        if match.group("type") != "max":
             continue
         body = match.group("body")
         slack_match = re.search(r"^\s*([-\d.]+)\s+slack ", body, re.MULTILINE)
@@ -1278,6 +1349,7 @@ def _parse_critical_path(report: str) -> Dict[str, Any] | None:
         paths.append({
             "startpoint": match.group("start").strip(),
             "endpoint": match.group("end").strip(),
+            "group": match.group("group"),
             "slack_ps": float(slack_match.group(1)),
             "arrival_ps": float(arrival_match.group(1)) if arrival_match else None,
             "body": body,
@@ -1285,7 +1357,14 @@ def _parse_critical_path(report: str) -> Dict[str, Any] | None:
     if not paths:
         return None
 
-    path = min(paths, key=lambda item: item["slack_ps"])
+    per_group: Dict[str, Dict[str, Any]] = {}
+    for path in paths:
+        group = path["group"]
+        current = per_group.get(group)
+        if current is None or path["slack_ps"] < current["slack_ps"]:
+            per_group[group] = path
+    worst_group = min(per_group, key=lambda group: per_group[group]["slack_ps"])
+    path = per_group[worst_group]
     start_name = path["startpoint"].split()[0]
     started = False
     cell_delay = 0.0
@@ -1333,9 +1412,10 @@ def _parse_critical_path(report: str) -> Dict[str, Any] | None:
         key=lambda item: item["delay_ps"],
         reverse=True,
     )[:8]
-    return {
+    breakdown = {
         "startpoint": path["startpoint"],
         "endpoint": path["endpoint"],
+        "group": path["group"],
         "slack_ps": path["slack_ps"],
         "arrival_ps": path["arrival_ps"],
         "data_path_delay_ps": round(total, 3),
@@ -1347,6 +1427,16 @@ def _parse_critical_path(report: str) -> Dict[str, Any] | None:
         "net_count": net_count,
         "dominant_cell_types": dominant,
     }
+    breakdown["per_group"] = {
+        group: {
+            "startpoint": item["startpoint"],
+            "endpoint": item["endpoint"],
+            "slack_ps": item["slack_ps"],
+            "arrival_ps": item["arrival_ps"],
+        }
+        for group, item in per_group.items()
+    }
+    return breakdown
 
 
 def _hz_to_mhz(value: Any) -> float | None:
@@ -1571,6 +1661,15 @@ def _diagnose(report: str, *, status: str, timeout: int) -> Dict[str, Any]:
             "evidence": evidence,
         }
 
+    if status == "partial" and _is_infra_make_failure(report):
+        return {
+            "status": "diagnosed",
+            "stage": stage or "route",
+            "root_cause": "The ORFS Makefile failed on a file operation after detailed routing completed.",
+            "suggested_fix": "Reuse the route ODB/DEF and DRC artifacts directly; rerun with clean=False to resume past the failed Makefile step.",
+            "evidence": evidence,
+        }
+
     if ("port" in lower and "not found" in lower) or ("get_ports" in lower and ("not found" in lower or "empty" in lower)):
         return {
             "status": "diagnosed",
@@ -1681,4 +1780,53 @@ def _evidence_lines(report: str, limit: int = 8) -> list[str]:
         stripped = line.strip()
         if any(pattern in stripped for pattern in patterns):
             lines.append(stripped)
+    return lines[-limit:]
+
+
+def _engine_warnings(
+    synthesis_engine: str,
+    swap_arithmetic_operators: bool,
+    abc_clock_period_ps: float | None,
+) -> List[str]:
+    """Warn about synthesis options the selected engine ignores."""
+    warnings: List[str] = []
+    if synthesis_engine == "syn" and swap_arithmetic_operators:
+        warnings.append(
+            "swap_arithmetic_operators is honored by the yosys engine only; "
+            "it has no effect with synthesis_engine='syn'"
+        )
+    if synthesis_engine == "syn" and abc_clock_period_ps is not None:
+        warnings.append(
+            "abc_clock_period_ps is honored by the yosys/ABC path only; "
+            "it has no effect with synthesis_engine='syn'"
+        )
+    return warnings
+
+
+def _is_infra_make_failure(report: str) -> bool:
+    """Detect Makefile/file-op failures as opposed to design failures."""
+    lower = report.lower()
+    has_make_error = "make[1]:" in report or "make:" in report
+    file_op_phrases = (
+        "cannot stat",
+        "no such file or directory",
+        "permission denied",
+        "no space left",
+        "command not found",
+    )
+    return has_make_error and any(phrase in lower for phrase in file_op_phrases)
+
+
+def _hook_log_summary(hook_log: str | None, limit: int = 10) -> list[str]:
+    """Extract ChipAgent hook lines from the high-fanout hook log file."""
+    if not hook_log:
+        return []
+    path = Path(hook_log)
+    if not path.is_file():
+        return []
+    lines = [
+        line.strip()
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines()
+        if line.strip().startswith("ChipAgent:")
+    ]
     return lines[-limit:]
