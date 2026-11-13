@@ -321,3 +321,9 @@ pytest tests/test_chat_mcp.py       # MCP 工具 + 意图路由
 ## 许可
 
 内部项目。
+
+ASAP7 physical-flow inputs may specify positive integer `docker_cpus` and
+`docker_memory_gib` limits. Both the main ORFS container and synthesis STA
+container receive these limits at creation; memory and swap limits are equal.
+The limits are recorded in the flow manifest and its cache identity. Omitted
+limits preserve Docker's existing defaults.

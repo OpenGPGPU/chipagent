@@ -604,3 +604,43 @@ def test_sdc_fails_loudly_on_missing_clock_port():
     sdc = _sdc("top", "clk", 1000.0)
     assert "get_ports -quiet" in sdc
     assert "not found in" in sdc
+
+
+@pytest.mark.parametrize("cpus,memory", [(0, 1), (True, 1), (1.5, 1), (1, -1), (1, "2"), (1, True)])
+def test_invalid_container_limits_never_start_docker(monkeypatch, cpus, memory):
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: pytest.fail("Docker started"))
+    with pytest.raises(ValueError):
+        _run_owned_docker(["docker", "run", "--rm", "image", "tool"], 30,
+                          cpus=cpus, memory_gib=memory)
+
+
+def test_main_synthesis_and_sta_receive_limits_before_launch(tmp_path, monkeypatch):
+    from chipagent.models import TaskObject
+    from chipagent.tools.base import ToolContext
+    import chipagent.tools.phys_flow_asap7 as physical
+
+    monkeypatch.setattr(physical, "docker_image_status", lambda image: {"cli_available": True, "usable": True})
+    monkeypatch.setattr(physical, "configured_openroad_image", lambda: "test-image")
+    commands = []
+
+    def run(command, **kwargs):
+        commands.append(list(command))
+        assert command[:3] == ["docker", "run", "--rm"]
+        for flag in ("--cpus=2", "--memory=3g", "--memory-swap=3g"):
+            assert command.count(flag) == 1
+            assert command.index(flag) < command.index("-v")
+        return subprocess.CompletedProcess(command, 0, "100.0 slack (MET)\n", "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    result = physical.ASAP7PhysicalFlowTool().run(ToolContext(
+        task=TaskObject(task_type="physical_flow_asap7", module_name="Top", description="Container resource gate"),
+        inputs={"reg_code": "module Top(input clock, input a, output b); assign b=a; endmodule",
+                "output_dir": str(tmp_path / "flow"), "clock_port": "clock", "cache": False,
+                "synthesis_only": True, "docker_cpus": 2, "docker_memory_gib": 3}))
+    assert result.result["status"] == "success"
+    assert len(commands) == 2
+    assert " synth" in commands[0][-1]
+    assert commands[1][-2:] == ["openroad", "/tmp/synthesis_sta.tcl"]
+    manifest = result.result["reproducibility"]
+    assert manifest["parameters"]["docker_cpus"] == 2
+    assert manifest["parameters"]["docker_memory_gib"] == 3

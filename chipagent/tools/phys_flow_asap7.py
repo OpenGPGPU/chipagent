@@ -36,13 +36,24 @@ def _remove_owned_docker_containers(owner: str) -> None:
             raise RuntimeError(f"ASAP7 containers remain after cleanup: {remaining}")
 
 
+def docker_resource_args(cpus: int | None, memory_gib: int | None) -> List[str]:
+    for name, value in (("docker_cpus", cpus), ("docker_memory_gib", memory_gib)):
+        if value is not None and (type(value) is not int or value < 1):
+            raise ValueError(f"{name} must be a positive integer")
+    return ([f"--cpus={cpus}"] if cpus is not None else []) + (
+        [f"--memory={memory_gib}g", f"--memory-swap={memory_gib}g"]
+        if memory_gib is not None else []
+    )
+
+
 def _run_owned_docker(
-    command: List[str], timeout: int
+    command: List[str], timeout: int, *,
+    cpus: int | None = None, memory_gib: int | None = None
 ) -> subprocess.CompletedProcess[str]:
     if command[:3] != ["docker", "run", "--rm"]:
         raise ValueError("Owned execution requires docker run --rm")
     owner = f"chipagent.asap7.owner={uuid.uuid4().hex}"
-    command[3:3] = ["--label", owner]
+    command[3:3] = ["--label", owner, *docker_resource_args(cpus, memory_gib)]
     try:
         return subprocess.run(
             command, capture_output=True, text=True, timeout=timeout
@@ -153,6 +164,14 @@ class ASAP7PhysicalFlowTool(Tool):
                 result={"status": "error", "message": f"Invalid module_name: {module_name}"},
                 issues=["Invalid input: module_name"],
             )
+
+        docker_cpus = ctx.inputs.get("docker_cpus")
+        docker_memory_gib = ctx.inputs.get("docker_memory_gib")
+        try:
+            docker_resource_args(docker_cpus, docker_memory_gib)
+        except ValueError as exc:
+            return ToolResult(result={"status": "error", "message": str(exc)},
+                              issues=["Invalid Docker resource limits"])
 
         image = configured_openroad_image()
         docker = docker_image_status(image)
@@ -370,6 +389,7 @@ class ASAP7PhysicalFlowTool(Tool):
             macro_gds=macro_gds,
             macro_placement_tcl=macro_placement_tcl,
             post_floorplan_tcl=post_floorplan_tcl,
+            docker_cpus=docker_cpus, docker_memory_gib=docker_memory_gib,
         )
         manifest_path = out / "flow_manifest.json"
         cache_enabled = bool(ctx.inputs.get("cache", True))
@@ -493,7 +513,7 @@ class ASAP7PhysicalFlowTool(Tool):
         timeout = int(ctx.inputs.get("timeout") or 1800)
         timed_out = False
         try:
-            proc = _run_owned_docker(cmd, timeout)
+            proc = _run_owned_docker(cmd, timeout, cpus=docker_cpus, memory_gib=docker_memory_gib)
             returncode = proc.returncode
             report = proc.stdout
             if proc.stderr:
@@ -554,7 +574,7 @@ class ASAP7PhysicalFlowTool(Tool):
                 "/tmp/synthesis_sta.tcl",
             ]
             try:
-                sta_proc = _run_owned_docker(sta_cmd, 600)
+                sta_proc = _run_owned_docker(sta_cmd, 600, cpus=docker_cpus, memory_gib=docker_memory_gib)
                 sta_report = sta_proc.stdout
                 if sta_proc.stderr:
                     sta_report = f"{sta_proc.stdout}\n\n[stderr]\n{sta_proc.stderr}"
@@ -907,6 +927,8 @@ def _manifest(
     macro_gds: List[Path] | None = None,
     macro_placement_tcl: Path | None = None,
     post_floorplan_tcl: Path | None = None,
+    docker_cpus: int | None = None,
+    docker_memory_gib: int | None = None,
 ) -> Dict[str, Any]:
     macro_files = [*(macro_lefs or []), *(macro_libs or []), *(macro_gds or [])]
     if macro_placement_tcl:
@@ -947,6 +969,8 @@ def _manifest(
         ),
         "openroad_image": image,
         "flow": "openroad-orfs",
+        "docker_cpus": docker_cpus,
+        "docker_memory_gib": docker_memory_gib,
         "macro_hashes": macro_hashes,
     }
     input_hash = hashlib.sha256(
@@ -982,6 +1006,8 @@ def _manifest(
             "post_floorplan_tcl": (
                 post_floorplan_tcl.name if post_floorplan_tcl is not None else None
             ),
+            "docker_cpus": docker_cpus,
+            "docker_memory_gib": docker_memory_gib,
             "macros": sorted(macro_hashes),
         },
     }
