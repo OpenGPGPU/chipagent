@@ -1,4 +1,8 @@
 import json
+import subprocess
+from types import SimpleNamespace
+
+import pytest
 
 from chipagent.tools.phys_flow_asap7 import (
     _build_overview,
@@ -11,7 +15,80 @@ from chipagent.tools.phys_flow_asap7 import (
     _sdc,
     _targeted_fanout_tcl,
     _rtl_source,
+    _run_owned_docker,
 )
+
+
+def test_owned_docker_success_keeps_the_actual_labeled_command(monkeypatch):
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append((list(command), kwargs))
+        return subprocess.CompletedProcess(command, 0, "completed", "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    command = ["docker", "run", "--rm", "image", "tool"]
+    result = _run_owned_docker(command, 30)
+    assert len(calls) == 1
+    assert command[:4] == ["docker", "run", "--rm", "--label"]
+    assert command[4].startswith("chipagent.asap7.owner=")
+    assert result.args == command == calls[0][0]
+    assert calls[0][1]["timeout"] == 30
+
+
+@pytest.mark.parametrize("failure", ["timeout", "interrupt"])
+def test_owned_docker_failure_removes_only_its_labeled_container(monkeypatch, failure):
+    calls = []
+    identity = "a" * 64
+    raised = subprocess.TimeoutExpired("docker", 30) if failure == "timeout" else KeyboardInterrupt()
+
+    def run(command, **kwargs):
+        calls.append(list(command))
+        if command[:2] == ["docker", "run"]:
+            raise raised
+        assert kwargs["timeout"] == 15
+        if command[:2] == ["docker", "ps"]:
+            assert command[-1] == "label=" + calls[0][4]
+            return SimpleNamespace(stdout=identity + "\n", returncode=0)
+        assert command == ["docker", "rm", "--force", identity]
+        return SimpleNamespace(stdout="", returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    with pytest.raises(type(raised)) as caught:
+        _run_owned_docker(["docker", "run", "--rm", "image", "tool"], 30)
+    assert caught.value is raised
+    assert len(calls) == 3
+
+
+def test_owned_docker_tolerates_a_container_exiting_during_cleanup(monkeypatch):
+    queries = 0
+
+    def run(command, **kwargs):
+        nonlocal queries
+        if command[:2] == ["docker", "run"]:
+            raise subprocess.TimeoutExpired(command, 1)
+        if command[:2] == ["docker", "ps"]:
+            queries += 1
+            return SimpleNamespace(stdout="a" * 64 if queries == 1 else "", returncode=0)
+        return SimpleNamespace(returncode=1, stdout="", stderr="No such container")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    with pytest.raises(subprocess.TimeoutExpired):
+        _run_owned_docker(["docker", "run", "--rm", "image", "tool"], 1)
+    assert queries == 2
+
+
+def test_owned_docker_reports_cleanup_failure(monkeypatch):
+    def run(command, **kwargs):
+        if command[:2] == ["docker", "run"]:
+            raise subprocess.TimeoutExpired(command, 1)
+        if command[:2] == ["docker", "ps"]:
+            return SimpleNamespace(stdout="a" * 64, returncode=0)
+        return SimpleNamespace(returncode=1, stdout="", stderr="daemon error")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    with pytest.raises(RuntimeError, match="cleanup could not be confirmed"):
+        _run_owned_docker(["docker", "run", "--rm", "image", "tool"], 1)
 
 
 def test_rtl_source_combines_ordered_multifile_design(tmp_path):
