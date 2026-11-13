@@ -1,17 +1,60 @@
 """ASAP7 physical implementation flow through OpenROAD Flow Scripts."""
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
-import json
-import hashlib
 import shutil
 import subprocess
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List
 
 from chipagent.toolchain import configured_openroad_image, docker_image_status
 from chipagent.tools.base import Tool, ToolContext, ToolResult, missing_tool_result, trust_metadata
+
+
+def _remove_owned_docker_containers(owner: str) -> None:
+    query = ["docker", "ps", "--all", "--quiet", "--filter", f"label={owner}"]
+    found = subprocess.run(
+        query, capture_output=True, text=True, timeout=15, check=True
+    ).stdout.split()
+    if not found:
+        return
+    if any(not re.fullmatch(r"[0-9a-f]{12,64}", identity) for identity in found):
+        raise RuntimeError("Docker returned an invalid owned container ID")
+    removed = subprocess.run(
+        ["docker", "rm", "--force", *found],
+        capture_output=True, text=True, timeout=15,
+    )
+    if removed.returncode:
+        remaining = subprocess.run(
+            query, capture_output=True, text=True, timeout=15, check=True
+        ).stdout.strip()
+        if remaining:
+            raise RuntimeError(f"ASAP7 containers remain after cleanup: {remaining}")
+
+
+def _run_owned_docker(
+    command: List[str], timeout: int
+) -> subprocess.CompletedProcess[str]:
+    if command[:3] != ["docker", "run", "--rm"]:
+        raise ValueError("Owned execution requires docker run --rm")
+    owner = f"chipagent.asap7.owner={uuid.uuid4().hex}"
+    command[3:3] = ["--label", owner]
+    try:
+        return subprocess.run(
+            command, capture_output=True, text=True, timeout=timeout
+        )
+    except BaseException as failure:
+        try:
+            _remove_owned_docker_containers(owner)
+        except Exception as cleanup_error:
+            raise RuntimeError(
+                f"ASAP7 container cleanup could not be confirmed: {cleanup_error}"
+            ) from failure
+        raise
 
 
 def _rtl_source(reg_code: str, rtl_files: Any) -> str:
@@ -450,12 +493,7 @@ class ASAP7PhysicalFlowTool(Tool):
         timeout = int(ctx.inputs.get("timeout") or 1800)
         timed_out = False
         try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
+            proc = _run_owned_docker(cmd, timeout)
             returncode = proc.returncode
             report = proc.stdout
             if proc.stderr:
@@ -516,12 +554,7 @@ class ASAP7PhysicalFlowTool(Tool):
                 "/tmp/synthesis_sta.tcl",
             ]
             try:
-                sta_proc = subprocess.run(
-                    sta_cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=600,
-                )
+                sta_proc = _run_owned_docker(sta_cmd, 600)
                 sta_report = sta_proc.stdout
                 if sta_proc.stderr:
                     sta_report = f"{sta_proc.stdout}\n\n[stderr]\n{sta_proc.stderr}"

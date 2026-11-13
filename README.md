@@ -153,6 +153,8 @@ Flow 报告保留兼容的二值 `status`，并提供更具体的 `outcome`：
 
 ASAP7 physical flow 默认启用缓存：当 RTL、模块名、clock/placement 参数和 OpenROAD 镜像一致，且已有 DEF/GDS/log 时会直接复用结果。需要强制重跑时，可调用 `chipagent_run_physical_flow_asap7(..., clean=True)`，或在 `chipagent_run_flow` 中设置 `physical_clean=True`。
 
+ASAP7 flow 和综合后 STA 在超时或中断时会删除本次调用创建的 Docker 容器，避免后台任务继续占用资源；若无法确认清理完成，会明确报告清理错误。
+
 对于布局布线后暴露出的单点高扇出网络，ASAP7 flow 支持定点修复而不是全局
 `set_max_fanout` 过缓冲：传入 `high_fanout_nets`（如
 `["storeTable.pendingEntry"]`）和 `high_fanout_max` 后，ChipAgent 会在
