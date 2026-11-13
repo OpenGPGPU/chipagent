@@ -644,3 +644,16 @@ def test_main_synthesis_and_sta_receive_limits_before_launch(tmp_path, monkeypat
     manifest = result.result["reproducibility"]
     assert manifest["parameters"]["docker_cpus"] == 2
     assert manifest["parameters"]["docker_memory_gib"] == 3
+
+
+def test_final_sdc_artifact_requires_the_actual_final_file(tmp_path):
+    from chipagent.tools.phys_flow_asap7 import _collect_artifacts
+
+    work = tmp_path / "work"
+    base = work / "results/base"
+    base.mkdir(parents=True)
+    (base / "1_synth.sdc").write_text("old constraints")
+    assert "final_sdc" not in _collect_artifacts(tmp_path, work, "Top")
+    final = base / "6_final.sdc"
+    final.write_text("final constraints")
+    assert _collect_artifacts(tmp_path, work, "Top")["final_sdc"] == str(final)

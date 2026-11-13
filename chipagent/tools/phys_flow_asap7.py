@@ -1291,6 +1291,7 @@ def _collect_artifacts(out: Path, work: Path, module_name: str) -> Dict[str, str
         "final_def": ["6_final.def", "6_1_merged.def", "*.def"],
         "final_gds": ["6_final.gds", "6_1_merged.gds", "*.gds"],
         "final_odb": ["6_final.odb", "*.odb"],
+        "final_sdc": ["6_final.sdc"],
         "route_drc": ["5_route_drc.rpt", "*drc*.rpt"],
         "synth_stat": ["synth_stat.txt", "*stat*.txt"],
     }
